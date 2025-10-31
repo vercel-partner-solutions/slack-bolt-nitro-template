@@ -2,10 +2,13 @@ import type { InboundWebhookPayload } from '@inboundemail/sdk';
 import { eventHandler, readBody } from 'h3';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { app } from '../../bolt/app';
-import { getInboundApiKey, getInboundEmailChannelId } from '../../bolt/utils/config';
+import WebClient from '@slack/bolt';
+import { eq } from 'drizzle-orm';
+import { db, schema } from '../db';
+import { getInboundApiKey } from '../../bolt/utils/config';
 import { parseEmailContent } from '../../bolt/utils/email-parser';
 import { threadStorage } from '../../bolt/utils/thread-storage';
+import { installationStore } from '../../bolt/utils/installation-store';
 
 // Development mode - saves POST payloads to .data/requests/ for replay testing
 const LOCAL_DEV = true;
@@ -203,7 +206,7 @@ export default eventHandler(async (event) => {
           console.log(`[INBOUND] 💾 Saved to: ${filePath}`);
 
           // Generate public URL for the attachment
-          const baseUrl = process.env.PUBLIC_URL || 'https://dev.inbound.new';
+          const baseUrl = process.env.PUBLIC_URL!;
           // URL-encode the filename to handle spaces and special characters
           const encodedFilename = encodeURIComponent(uniqueFilename);
           const attachmentUrl = `${baseUrl}/api/attachment/${encodedFilename}`;
@@ -259,46 +262,120 @@ export default eventHandler(async (event) => {
     console.log(`  Username: ${fullUsername}`);
     console.log(`  Avatar: ${avatarUrl}`);
 
-    // Post to Slack channel (or thread if this is a reply)
-    const channelId = getInboundEmailChannelId();
-    console.log(
-      `[INBOUND] 📤 Posting to Slack channel: ${channelId}${slackThreadTs ? ` (thread: ${slackThreadTs})` : ''}`,
-    );
-
-    const totalAttachments = imageUrls.length + fileLinks.length;
-    if (totalAttachments > 0) {
-      console.log(`[INBOUND] 📎 ${totalAttachments} attachment(s) will appear with custom sender identity`);
+    // Look up email route to determine workspace and channel
+    const toEmail = email.to?.addresses?.[0]?.address;
+    if (!toEmail) {
+      console.error('[INBOUND] ❌ No destination email address found');
+      return {
+        success: false,
+        error: 'No destination email address',
+      };
     }
 
-    // Debug: Log the blocks being sent to Slack
-    console.log('[INBOUND] 🔍 Blocks being sent to Slack:');
-    console.log(JSON.stringify(blocks, null, 2));
+    console.log(`[INBOUND] 🔍 Looking up route for: ${toEmail}`);
 
-    const response = await app.client.chat.postMessage({
-      channel: channelId,
-      text: cleanedText,
-      blocks, // Message blocks (includes images and file links)
-      unfurl_links: false,
-      unfurl_media: false,
-      username: fullUsername, // Display sender's name and email as the bot username
-      icon_url: avatarUrl, // Use inbound.new avatar API
-      ...(slackThreadTs && { thread_ts: slackThreadTs }),
-      // Note: Attachments are served via /api/attachment and included as image blocks or links
-      // This allows them to appear with custom username/icon (solving Slack API limitation)
+    const routes = await db.query.emailRoutes.findMany({
+      where: eq(schema.emailRoutes.emailAddress, toEmail),
     });
 
-    console.log(`[INBOUND] ✅ Posted to Slack successfully! Message TS: ${response.ts}`);
-
-    // Store thread mapping if this is the first message in a thread
-    if (inboundThreadId && response.ts && !slackThreadTs) {
-      console.log('[INBOUND] 💾 Storing new thread mapping...');
-      await threadStorage.set(inboundThreadId, response.ts, email.id);
-      console.log(`[THREAD MAPPING] ✅ Created new: ${inboundThreadId} -> ${response.ts}`);
-      console.log(`  Email ID: ${email.id}`);
-    } else if (inboundThreadId && slackThreadTs) {
-      console.log(`[THREAD MAPPING] ℹ️  Using existing: ${inboundThreadId} -> ${slackThreadTs}`);
-      console.log(`  Email ID: ${email.id}`);
+    if (routes.length === 0) {
+      console.error(`[INBOUND] ❌ No route found for email: ${toEmail}`);
+      return {
+        success: false,
+        error: `No route configured for ${toEmail}`,
+      };
     }
+
+    console.log(`[INBOUND] ✅ Found ${routes.length} route(s) for ${toEmail}`);
+
+    // Post to each matching route (usually just one)
+    const responses = [];
+    for (const route of routes) {
+      if (!route.isActive) {
+        console.log(`[INBOUND] ⏭️  Skipping inactive route for team: ${route.teamId}`);
+        continue;
+      }
+
+      try {
+        console.log(`[INBOUND] 📤 Posting to workspace: ${route.teamId}`);
+
+        // Get workspace installation and token
+        const installation = await installationStore.fetchInstallation({
+          teamId: route.teamId,
+          isEnterpriseInstall: false,
+          enterpriseId: undefined,
+        });
+
+        // Create workspace-specific client
+        const workspaceClient = new WebClient({
+          token: installation.bot?.token!,
+        });
+
+        // Determine target (channel or DM)
+        const target = route.channelId || route.userId;
+        if (!target) {
+          console.error(`[INBOUND] ❌ Route has no channelId or userId for team: ${route.teamId}`);
+          continue;
+        }
+
+        console.log(
+          `[INBOUND] 📤 Posting to ${route.channelId ? 'channel' : 'user'}: ${target}${slackThreadTs ? ` (thread: ${slackThreadTs})` : ''}`,
+        );
+
+        const totalAttachments = imageUrls.length + fileLinks.length;
+        if (totalAttachments > 0) {
+          console.log(`[INBOUND] 📎 ${totalAttachments} attachment(s) will appear with custom sender identity`);
+        }
+
+        // Debug: Log the blocks being sent to Slack
+        console.log('[INBOUND] 🔍 Blocks being sent to Slack:');
+        console.log(JSON.stringify(blocks, null, 2));
+
+        const response = await workspaceClient.client.chat.postMessage({
+          channel: target,
+          text: cleanedText,
+          blocks, // Message blocks (includes images and file links)
+          unfurl_links: false,
+          unfurl_media: false,
+          username: fullUsername, // Display sender's name and email as the bot username
+          icon_url: avatarUrl, // Use inbound.new avatar API
+          ...(slackThreadTs && { thread_ts: slackThreadTs }),
+          // Note: Attachments are served via /api/attachment and included as image blocks or links
+          // This allows them to appear with custom username/icon (solving Slack API limitation)
+        });
+
+        console.log(`[INBOUND] ✅ Posted to workspace ${route.teamId} successfully! Message TS: ${response.ts}`);
+        
+        responses.push({
+          teamId: route.teamId,
+          channelId: target,
+          messageTs: response.ts,
+        });
+
+        // Store thread mapping if this is the first message in a thread
+        if (inboundThreadId && response.ts && !slackThreadTs) {
+          console.log('[INBOUND] 💾 Storing new thread mapping...');
+          await threadStorage.set(inboundThreadId, response.ts, email.id);
+          console.log(`[THREAD MAPPING] ✅ Created new: ${inboundThreadId} -> ${response.ts}`);
+          console.log(`  Email ID: ${email.id}`);
+        } else if (inboundThreadId && slackThreadTs) {
+          console.log(`[THREAD MAPPING] ℹ️  Using existing: ${inboundThreadId} -> ${slackThreadTs}`);
+          console.log(`  Email ID: ${email.id}`);
+        }
+      } catch (error) {
+        console.error(`[INBOUND] ❌ Error posting to workspace ${route.teamId}:`, error);
+        // Continue with other routes even if one fails
+      }
+    }
+
+    if (responses.length === 0) {
+      console.error('[INBOUND] ❌ Failed to post to any workspace');
+      return {
+        success: false,
+        error: 'Failed to post to any workspace',
+      };
+    }
+
     // Note: Email is already marked as processed by the atomic check at the beginning
 
     console.log('[INBOUND] 🎉 Successfully processed email!');
@@ -308,7 +385,7 @@ export default eventHandler(async (event) => {
       success: true,
       emailId: email.id,
       threadId: inboundThreadId,
-      slackThreadTs: response.ts,
+      workspaces: responses,
     };
   } catch (error) {
     console.error('[INBOUND] ❌ ERROR processing webhook:');

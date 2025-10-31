@@ -165,51 +165,100 @@ export async function getSlackWorkspaceInfo() {
 }
 
 /**
- * Fetch Slack channels using the Slack SDK
+ * Fetch Slack channels using the bot token (if installed)
+ * This endpoint checks if the bot is installed in the workspace and uses bot permissions
  */
 export async function fetchSlackChannels() {
   try {
-    const accessToken = await getSlackAccessToken();
+    // Get user's workspace team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
     
-    if (!accessToken) {
+    if (!workspaceInfo.success || !workspaceInfo.data) {
       return {
         success: false,
-        error: "Slack access token not found. Please sign in with Slack.",
+        error: "Cannot determine your workspace. Please sign in with Slack.",
       };
     }
-
-    const client = new WebClient(accessToken);
-    const result = await client.conversations.list({
-      types: "public_channel,private_channel",
-      exclude_archived: true,
-    });
-
-    if (!result.ok) {
-      return {
-        success: false,
-        error: result.error || "Failed to fetch channels",
-      };
-    }
-
-    const channels = (result.channels || [])
-      .filter((channel) => channel.id && channel.name)
-      .map((channel) => ({
-        id: channel.id!,
-        name: channel.name!,
-        isPrivate: channel.is_private || false,
-        isMember: channel.is_member || false,
-        numMembers: channel.num_members || 0,
-      }));
-
-    return {
-      success: true,
-      data: channels,
-    };
+    
+    const teamId = workspaceInfo.data.teamId;
+    
+    // Call api-server to check bot installation and fetch channels
+    const { apiClient } = await import("@/lib/api-client");
+    const result = await apiClient<{
+      success: boolean;
+      data?: Array<{
+        id: string;
+        name: string;
+        isPrivate: boolean;
+        isMember: boolean;
+        numMembers: number;
+      }>;
+      error?: string;
+      message?: string;
+    }>(`/api/workspace/${teamId}/channels`);
+    
+    return result;
   } catch (error) {
     console.error("Error fetching Slack channels:", error);
+    
+    // Check if it's a 401 (bot not installed)
+    if (error && typeof error === 'object' && 'data' in error) {
+      const errorData = error.data as { error?: string; message?: string };
+      if (errorData?.error === 'bot_not_installed') {
+        return {
+          success: false,
+          error: "bot_not_installed",
+          message: errorData.message || "Bot not installed in your workspace",
+        };
+      }
+    }
+    
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to fetch channels",
+    };
+  }
+}
+
+/**
+ * Check if the bot is installed in the user's workspace
+ */
+export async function checkBotInstallation() {
+  try {
+    // Get user's workspace team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    
+    // Call api-server to check installation status
+    const { apiClient } = await import("@/lib/api-client");
+    const result = await apiClient<{
+      success: boolean;
+      installed: boolean;
+      data?: {
+        teamId: string;
+        teamName: string;
+        teamUrl: string;
+        botUserId: string;
+        scopes: string[];
+        installedAt: Date;
+        installedBy: string;
+      };
+    }>(`/api/workspace/${teamId}/status`);
+    
+    return result;
+  } catch (error) {
+    console.error("Error checking bot installation:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to check installation",
     };
   }
 }

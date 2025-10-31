@@ -13,6 +13,7 @@ import {
   fetchInboundDomains,
   fetchSlackChannels,
   getSlackWorkspaceInfo,
+  checkBotInstallation,
 } from "@/app/actions/user-config";
 import { Input } from "@/components/ui/input";
 import {
@@ -71,6 +72,8 @@ export default function DashboardPage() {
     userName: string;
   } | null>(null);
   const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
+  const [botInstalled, setBotInstalled] = useState<boolean | null>(null);
+  const [isCheckingBot, setIsCheckingBot] = useState(false);
   // Mock channel mappings data with different colors
   const colors = ["bg-blue-500", "bg-purple-500", "bg-green-500", "bg-orange-500"];
   const [channelMappings, setChannelMappings] = useState<
@@ -146,7 +149,12 @@ export default function DashboardPage() {
     if (result.success && result.data) {
       setSlackChannels(result.data);
     } else {
-      setChannelsError(result.error || "Failed to load channels");
+      // Store both error code and message for better UI handling
+      if (result.error === "bot_not_installed") {
+        setChannelsError("bot_not_installed");
+      } else {
+        setChannelsError(result.error || result.message || "Failed to load channels");
+      }
     }
   };
 
@@ -158,6 +166,17 @@ export default function DashboardPage() {
 
     if (result.success && result.data) {
       setWorkspaceInfo(result.data);
+    }
+  };
+
+  // Check bot installation status
+  const loadBotStatus = async () => {
+    setIsCheckingBot(true);
+    const result = await checkBotInstallation();
+    setIsCheckingBot(false);
+
+    if (result.success && 'installed' in result) {
+      setBotInstalled(result.installed);
     }
   };
 
@@ -189,11 +208,11 @@ export default function DashboardPage() {
           setIsInitialLoading(false);
         });
 
-      // Load Slack channels and workspace info
+      // Load Slack channels, workspace info, and bot status
       loadSlackChannels();
       loadWorkspaceInfo();
+      loadBotStatus();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPending, user]);
 
   // Handle saving inbound API key
@@ -340,9 +359,27 @@ export default function DashboardPage() {
                   </span>
                 </div>
               ) : channelsError ? (
-                <div className="rounded-md border border-destructive/50 bg-destructive/10 p-4">
-                  <p className="text-sm text-destructive">{channelsError}</p>
-                </div>
+                channelsError === "bot_not_installed" ? (
+                  <div className="rounded-md border border-orange-500/50 bg-orange-500/10 p-4">
+                    <p className="text-sm font-medium text-orange-700 mb-3">
+                      Bot Not Installed
+                    </p>
+                    <p className="text-sm text-orange-600 mb-4">
+                      The SlackBound bot needs to be installed in your workspace to manage channels. 
+                      Please install it using the button in the Developer section above.
+                    </p>
+                    <Link
+                      href="/nextjs/api/slack/install"
+                      className="inline-flex items-center gap-2 rounded-md bg-orange-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-orange-700 transition-colors"
+                    >
+                      Install Bot Now
+                    </Link>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-destructive/50 bg-destructive/10 p-4">
+                    <p className="text-sm text-destructive">{channelsError}</p>
+                  </div>
+                )
               ) : slackChannels.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   No channels found.
@@ -479,6 +516,63 @@ export default function DashboardPage() {
                     >
                       {workspaceInfo.teamUrl}
                     </a>
+                  </div>
+                  <hr className="my-6 border-border" />
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-3">
+                      Bot Installation Status
+                    </p>
+                    {isCheckingBot ? (
+                      <div className="flex items-center gap-2 py-2">
+                        <div className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        <span className="text-xs text-muted-foreground">
+                          Checking installation...
+                        </span>
+                      </div>
+                    ) : botInstalled === true ? (
+                      <div className="rounded-md border border-green-500/50 bg-green-500/10 p-3">
+                        <div className="flex items-center gap-2">
+                          <div className="h-2 w-2 rounded-full bg-green-500" />
+                          <p className="text-sm font-medium text-green-700">
+                            Bot Installed
+                          </p>
+                        </div>
+                        <p className="mt-1 text-xs text-green-600">
+                          The bot is active in your workspace
+                        </p>
+                      </div>
+                    ) : botInstalled === false ? (
+                      <div>
+                        <div className="rounded-md border border-orange-500/50 bg-orange-500/10 p-3 mb-3">
+                          <div className="flex items-center gap-2">
+                            <div className="h-2 w-2 rounded-full bg-orange-500" />
+                            <p className="text-sm font-medium text-orange-700">
+                              Not Installed
+                            </p>
+                          </div>
+                          <p className="mt-1 text-xs text-orange-600">
+                            Install the bot to enable full functionality
+                          </p>
+                        </div>
+                        <Link
+                          href="/nextjs/api/slack/install"
+                          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 54 54"
+                            className="h-5 w-5"
+                            fill="currentColor"
+                          >
+                            <path d="M19.712.133a5.381 5.381 0 0 0-5.376 5.387 5.381 5.381 0 0 0 5.376 5.386h5.376V5.52A5.381 5.381 0 0 0 19.712.133m0 14.365H5.376A5.381 5.381 0 0 0 0 19.884a5.381 5.381 0 0 0 5.376 5.387h14.336a5.381 5.381 0 0 0 5.376-5.387 5.381 5.381 0 0 0-5.376-5.386" />
+                            <path d="M53.76 19.884a5.381 5.381 0 0 0-5.376-5.386 5.381 5.381 0 0 0-5.376 5.386v5.387h5.376a5.381 5.381 0 0 0 5.376-5.387m-14.336 0V5.52A5.381 5.381 0 0 0 34.048.133a5.381 5.381 0 0 0-5.376 5.387v14.364a5.381 5.381 0 0 0 5.376 5.387 5.381 5.381 0 0 0 5.376-5.387" />
+                            <path d="M34.048 54a5.381 5.381 0 0 0 5.376-5.387 5.381 5.381 0 0 0-5.376-5.386h-5.376v5.386A5.381 5.381 0 0 0 34.048 54m0-14.365h14.336a5.381 5.381 0 0 0 5.376-5.386 5.381 5.381 0 0 0-5.376-5.387H34.048a5.381 5.381 0 0 0-5.376 5.387 5.381 5.381 0 0 0 5.376 5.386" />
+                            <path d="M0 34.249a5.381 5.381 0 0 0 5.376 5.386 5.381 5.381 0 0 0 5.376-5.386v-5.387H5.376A5.381 5.381 0 0 0 0 34.25m14.336 0v14.364a5.381 5.381 0 0 0 5.376 5.387 5.381 5.381 0 0 0 5.376-5.387V34.25a5.381 5.381 0 0 0-5.376-5.387 5.381 5.381 0 0 0-5.376 5.387" />
+                          </svg>
+                          Add Bot to Workspace
+                        </Link>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : (

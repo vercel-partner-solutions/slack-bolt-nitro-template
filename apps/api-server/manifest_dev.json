@@ -35,11 +35,14 @@
         "command": "/compose",
         "description": "Composes a new email",
         "should_escape": false,
-        "url": "https://dev.inbound.new/api/slack/events"
+        "url": "https://dev.slackbound.com/api/slack/events"
       }
     ]
   },
   "oauth_config": {
+    "redirect_urls": [
+      "https://dev.slackbound.com/nextjs/api/slack/callback"
+    ],
     "scopes": {
       "bot": [
         "channels:history",
@@ -64,12 +67,12 @@
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://dev.inbound.new/api/slack/events",
-      "bot_events": ["app_home_opened", "message.channels", "message.groups", "message.im", "message.mpim"]
+      "request_url": "https://dev.slackbound.com/api/slack/events",
+      "bot_events": ["app_home_opened", "app_uninstalled", "message.channels", "message.groups", "message.im", "message.mpim"]
     },
     "interactivity": {
       "is_enabled": true,
-      "request_url": "https://dev.inbound.new/api/slack/events"
+      "request_url": "https://dev.slackbound.com/api/slack/events"
     },
     "org_deploy_enabled": true,
     "socket_mode_enabled": false,
