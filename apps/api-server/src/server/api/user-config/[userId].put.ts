@@ -1,7 +1,7 @@
 import { eventHandler, getRouterParam, readBody } from "h3";
 import { eq } from "drizzle-orm";
 import { db } from "../../db";
-import { userConfig } from "../../db/schema";
+import { userConfig } from "@slackbound/db";
 
 interface UpdateConfigBody {
 	sendingDomain?: string;
@@ -38,14 +38,7 @@ export default eventHandler(async (event) => {
 		let result;
 
 		if (existingConfig.length === 0) {
-			// Create new config - require sendingDomain for new configs
-			if (!body.sendingDomain) {
-				return {
-					success: false,
-					error: "sendingDomain is required for new user configurations",
-				};
-			}
-
+			// Create new config - sendingDomain is optional but recommended
 			result = await db
 				.insert(userConfig)
 				.values({

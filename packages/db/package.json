@@ -1,0 +1,23 @@
+{
+  "name": "@slackbound/db",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.44.7"
+  },
+  "devDependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "dotenv-mono": "^1.3.14",
+    "drizzle-kit": "^0.31.6",
+    "typescript": "^5"
+  }
+}
+

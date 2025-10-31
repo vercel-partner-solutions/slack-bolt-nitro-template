@@ -5,3 +5,5 @@ alwaysApply: true
 You cannot use the /api/ routes becuase we have them rewriting to the api-server.
 
 All local nextjs routes should be under /nextjs/api/ routes.
+
+Never generate summary documents after you complete a task.

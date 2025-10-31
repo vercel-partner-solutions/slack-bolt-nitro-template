@@ -1,7 +1,9 @@
+// Load env vars from root first
+import "@/lib/env";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { getDb } from "@/db";
-import * as schema from "@/db/schema";
+import * as schema from "@slackbound/db";
 
 let cachedAuth: ReturnType<typeof betterAuth> | null = null;
 

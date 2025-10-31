@@ -2,9 +2,11 @@
 
 This project uses [Drizzle ORM](https://orm.drizzle.team/) with NeonDB (PostgreSQL).
 
+**Note:** The actual database schema is now in the shared `packages/db/` package to ensure consistency across all apps.
+
 ## Configuration
 
-Set the `DATABASE_URL` environment variable in your `.env` file:
+Set the `DATABASE_URL` environment variable in the **monorepo root** `.env` file:
 
 ```bash
 DATABASE_URL=postgresql://user:password@host/database?sslmode=require
@@ -15,16 +17,20 @@ Get your connection string from [Neon Console](https://console.neon.tech/).
 ## Directory Structure
 
 - `src/server/db/index.ts` - Database client initialization
-- `src/server/db/schema/` - Database schema definitions
-- `drizzle.config.ts` - Drizzle Kit configuration
+- `drizzle.config.ts` - Drizzle Kit configuration (points to shared schema)
 - `drizzle/` - Generated migrations (auto-generated, git-ignored)
+
+**Shared Schema Location:**
+- `packages/db/src/schema/` - All database schema definitions (monorepo root)
 
 ## Creating Schemas
 
-1. Create a new schema file in `src/server/db/schema/`:
+All schemas should be created in the shared package at `packages/db/src/schema/`:
+
+1. Create a new schema file in `packages/db/src/schema/`:
 
 ```typescript
-// src/server/db/schema/users.ts
+// packages/db/src/schema/users.ts
 import { pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
@@ -36,11 +42,13 @@ export const users = pgTable("users", {
 });
 ```
 
-2. Export it in `src/server/db/schema/index.ts`:
+2. Export it in `packages/db/src/schema/index.ts`:
 
 ```typescript
 export * from "./users";
 ```
+
+3. The schema is automatically available to all apps via the `@slackbound/db` package.
 
 ## Available Commands
 
@@ -78,29 +86,36 @@ pnpm db:studio
 
 ## Usage in Code
 
-Import the database client and use it in your API routes:
+Import the database client from this app and schemas from the shared package:
 
 ```typescript
+// Database client (app-specific connection)
 import { db } from "~/server/db";
-import { users } from "~/server/db/schema";
+
+// Schemas (from shared package)
+import { user, userConfig, waitlist } from "@slackbound/db";
 import { eq } from "drizzle-orm";
 
 // Query
-const allUsers = await db.select().from(users);
+const allUsers = await db.select().from(user);
 
 // Insert
-const newUser = await db.insert(users).values({
-  email: "user@example.com",
+const newUser = await db.insert(user).values({
+  id: "user_123",
   name: "John Doe",
+  email: "user@example.com",
+  emailVerified: false,
+  createdAt: new Date(),
+  updatedAt: new Date(),
 }).returning();
 
 // Update
-await db.update(users)
+await db.update(user)
   .set({ name: "Jane Doe" })
-  .where(eq(users.id, 1));
+  .where(eq(user.id, "user_123"));
 
 // Delete
-await db.delete(users).where(eq(users.id, 1));
+await db.delete(user).where(eq(user.id, "user_123"));
 ```
 
 ## Best Practices

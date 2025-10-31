@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import ngrok from '@ngrok/ngrok';
 import dotenv from 'dotenv';
 
-dotenv.config({ path: '.env', quiet: true });
+dotenv.config({ path: '../../.env', quiet: true });
 
 const DEFAULT_PORT = 3000;
 const MANIFEST_PATH = 'manifest.json';

@@ -7,10 +7,10 @@ load();
 
 export default defineConfig({
 	out: "./drizzle",
-	schema: resolve(__dirname, "../../packages/db/src/schema/index.ts"),
+	schema: resolve(__dirname, "./src/schema/index.ts"),
 	dialect: "postgresql",
 	dbCredentials: {
-		url: process.env.DATABASE_URL as string,
+		url: process.env.DATABASE_URL!,
 	},
 	verbose: true,
 	strict: true,

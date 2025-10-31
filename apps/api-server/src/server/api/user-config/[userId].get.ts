@@ -1,7 +1,7 @@
 import { eventHandler, getRouterParam } from "h3";
 import { eq } from "drizzle-orm";
 import { db } from "../../db";
-import { userConfig } from "../../db/schema";
+import { userConfig } from "@slackbound/db";
 
 export default eventHandler(async (event) => {
 	try {

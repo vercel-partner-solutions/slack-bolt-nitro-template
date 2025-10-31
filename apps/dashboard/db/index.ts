@@ -1,6 +1,8 @@
+// Load env vars from root first
+import "@/lib/env";
 import { drizzle } from "drizzle-orm/neon-http";
 import { neon } from "@neondatabase/serverless";
-import * as schema from "./schema";
+import * as schema from "@slackbound/db";
 
 let cachedDb: ReturnType<typeof drizzle> | null = null;
 

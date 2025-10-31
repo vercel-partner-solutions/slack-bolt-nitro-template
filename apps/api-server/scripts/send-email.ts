@@ -1,7 +1,7 @@
 import { Inbound } from '@inboundemail/sdk';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ path: '../../.env' });
 
 const inbound = new Inbound(process.env.INBOUND_API_KEY || '');
 

@@ -1,9 +1,11 @@
 "use server";
 
+// Load env vars from root first
+import "@/lib/env";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
 import { getDb } from "@/db";
-import { userConfig, account } from "@/db/schema";
+import { userConfig, account } from "@slackbound/db";
 import { getAuth } from "@/lib/auth";
 import { WebClient } from "@slack/web-api";
 
@@ -378,19 +380,20 @@ export async function updateUserConfig(config: {
 
     // Handle inboundApiKey update (only stored locally, not synced to API server)
     const updateData: {
-      sendingDomain?: string | null;
+      sendingDomain?: string;
       shouldShowFullEmail?: boolean;
-      inboundApiKey?: string | null;
+      inboundApiKey?: string;
       updatedAt: Date;
     } = {
       updatedAt: new Date(),
     };
 
     // Use config values if provided, otherwise fall back to API response
-    if (config.sendingDomain !== undefined) {
-      updateData.sendingDomain = config.sendingDomain || null;
-    } else if (updatedConfig.sendingDomain !== undefined) {
-      updateData.sendingDomain = updatedConfig.sendingDomain || null;
+    // Only include fields that are defined (omit null/undefined values)
+    if (config.sendingDomain !== undefined && config.sendingDomain !== null) {
+      updateData.sendingDomain = config.sendingDomain;
+    } else if (updatedConfig.sendingDomain !== undefined && updatedConfig.sendingDomain !== null) {
+      updateData.sendingDomain = updatedConfig.sendingDomain;
     }
     
     if (config.shouldShowFullEmail !== undefined) {
@@ -399,16 +402,16 @@ export async function updateUserConfig(config: {
       updateData.shouldShowFullEmail = updatedConfig.shouldShowFullEmail ?? false;
     }
     
-    if (config.inboundApiKey !== undefined) {
-      updateData.inboundApiKey = config.inboundApiKey || null;
+    if (config.inboundApiKey !== undefined && config.inboundApiKey !== null) {
+      updateData.inboundApiKey = config.inboundApiKey;
     }
 
     if (existingConfig.length === 0) {
       await db.insert(userConfig).values({
         userId: slackUserId,
-        sendingDomain: config.sendingDomain || updatedConfig.sendingDomain || null,
+        sendingDomain: config.sendingDomain || updatedConfig.sendingDomain || undefined,
         shouldShowFullEmail: config.shouldShowFullEmail ?? updatedConfig.shouldShowFullEmail ?? false,
-        inboundApiKey: config.inboundApiKey || null,
+        inboundApiKey: config.inboundApiKey || undefined,
         updatedAt: new Date(),
       });
     } else {
