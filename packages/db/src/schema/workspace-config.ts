@@ -23,6 +23,9 @@ export const workspaceConfig = pgTable("workspace_config", {
   // Email sending domain for replies
   sendingDomain: text("sending_domain"),
   
+  // Channel name prefix for new channels (default: "ext-inbd-*")
+  channelNamePrefix: text("channel_name_prefix"),
+  
   // Timestamps
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

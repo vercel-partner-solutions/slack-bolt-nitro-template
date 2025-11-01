@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 interface UpdateConfigBody {
 	shouldShowFullEmail?: boolean;
 	sendingDomain?: string | null;
+	channelNamePrefix?: string | null;
 }
 
 export default eventHandler(async (event) => {
@@ -24,7 +25,7 @@ export default eventHandler(async (event) => {
 	try {
 		const body = await readBody<UpdateConfigBody>(event);
 
-		if (body.shouldShowFullEmail === undefined && body.sendingDomain === undefined) {
+		if (body.shouldShowFullEmail === undefined && body.sendingDomain === undefined && body.channelNamePrefix === undefined) {
 			return {
 				success: false,
 				error: "At least one field is required",
@@ -45,6 +46,7 @@ export default eventHandler(async (event) => {
 				teamId: string;
 				shouldShowFullEmail?: boolean;
 				sendingDomain?: string | null;
+				channelNamePrefix?: string | null;
 				emailIntegrationEnabled: boolean;
 				updatedAt: Date;
 			} = {
@@ -61,6 +63,10 @@ export default eventHandler(async (event) => {
 				values.sendingDomain = body.sendingDomain;
 			}
 			
+			if (body.channelNamePrefix !== undefined) {
+				values.channelNamePrefix = body.channelNamePrefix;
+			}
+			
 			result = await db
 				.insert(workspaceConfig)
 				.values(values)
@@ -70,6 +76,7 @@ export default eventHandler(async (event) => {
 			const updateValues: {
 				shouldShowFullEmail?: boolean;
 				sendingDomain?: string | null;
+				channelNamePrefix?: string | null;
 				updatedAt: Date;
 			} = {
 				updatedAt: new Date(),
@@ -81,6 +88,10 @@ export default eventHandler(async (event) => {
 			
 			if (body.sendingDomain !== undefined) {
 				updateValues.sendingDomain = body.sendingDomain;
+			}
+			
+			if (body.channelNamePrefix !== undefined) {
+				updateValues.channelNamePrefix = body.channelNamePrefix;
 			}
 			
 			result = await db

@@ -22,11 +22,19 @@
 
 import { Redis } from '@upstash/redis';
 
+export interface EmailRecipients {
+  to: Array<{ name?: string; address: string }>;
+  cc?: Array<{ name?: string; address: string }>;
+  from?: { name?: string; address: string };
+}
+
 interface ThreadStorage {
   set(inboundThreadId: string, slackThreadTs: string, emailId: string): Promise<void>;
   getSlackThreadTs(inboundThreadId: string): Promise<string | null>;
   getInboundThreadId(slackThreadTs: string): Promise<string | null>;
   getEmailId(slackThreadTs: string): Promise<string | null>;
+  setEmailRecipients(slackThreadTs: string, recipients: EmailRecipients): Promise<void>;
+  getEmailRecipients(slackThreadTs: string): Promise<EmailRecipients | null>;
   hasProcessedEmail(emailId: string): Promise<boolean>;
   markEmailProcessed(emailId: string): Promise<void>;
   checkAndMarkEmailProcessed(emailId: string): Promise<boolean>;
@@ -39,6 +47,7 @@ interface ThreadStorage {
 class InMemoryThreadStorage implements ThreadStorage {
   private inboundToSlack = new Map<string, { slackThreadTs: string; emailId: string }>();
   private slackToInbound = new Map<string, string>();
+  private emailRecipients = new Map<string, EmailRecipients>();
   private processedEmails = new Set<string>();
   private processedSlackMessages = new Set<string>();
 
@@ -60,6 +69,14 @@ class InMemoryThreadStorage implements ThreadStorage {
     const inboundThreadId = await this.getInboundThreadId(slackThreadTs);
     if (!inboundThreadId) return null;
     return this.inboundToSlack.get(inboundThreadId)?.emailId || null;
+  }
+
+  async setEmailRecipients(slackThreadTs: string, recipients: EmailRecipients): Promise<void> {
+    this.emailRecipients.set(slackThreadTs, recipients);
+  }
+
+  async getEmailRecipients(slackThreadTs: string): Promise<EmailRecipients | null> {
+    return this.emailRecipients.get(slackThreadTs) || null;
   }
 
   async hasProcessedEmail(emailId: string): Promise<boolean> {
@@ -148,6 +165,20 @@ class RedisThreadStorage implements ThreadStorage {
       return parsed.emailId;
     }
     return data.emailId;
+  }
+
+  async setEmailRecipients(slackThreadTs: string, recipients: EmailRecipients): Promise<void> {
+    await this.redis.set(`recipients:${slackThreadTs}`, JSON.stringify(recipients));
+  }
+
+  async getEmailRecipients(slackThreadTs: string): Promise<EmailRecipients | null> {
+    const data = await this.redis.get<EmailRecipients | string>(`recipients:${slackThreadTs}`);
+    if (!data) return null;
+    // Upstash Redis auto-deserializes JSON, so data is already an object
+    if (typeof data === 'string') {
+      return JSON.parse(data);
+    }
+    return data;
   }
 
   async hasProcessedEmail(emailId: string): Promise<boolean> {

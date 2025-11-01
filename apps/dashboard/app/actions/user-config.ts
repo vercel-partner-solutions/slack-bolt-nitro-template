@@ -1135,6 +1135,7 @@ export async function getWorkspaceConfig() {
 export async function updateWorkspaceConfig(config: {
   shouldShowFullEmail?: boolean;
   sendingDomain?: string | null;
+  channelNamePrefix?: string | null;
 }) {
   try {
     const workspaceInfo = await getSlackWorkspaceInfo();

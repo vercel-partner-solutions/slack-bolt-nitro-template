@@ -30,6 +30,7 @@ export default eventHandler(async (event) => {
 				data: {
 					shouldShowFullEmail: false,
 					sendingDomain: null,
+					channelNamePrefix: 'ext-inbd-*',
 				},
 			};
 		}
@@ -39,6 +40,7 @@ export default eventHandler(async (event) => {
 			data: {
 				shouldShowFullEmail: config[0].shouldShowFullEmail ?? false,
 				sendingDomain: config[0].sendingDomain ?? null,
+				channelNamePrefix: config[0].channelNamePrefix ?? 'ext-inbd-*',
 			},
 		};
 	} catch (error) {

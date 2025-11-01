@@ -7,7 +7,7 @@ import { eq } from 'drizzle-orm';
 import { db, schema } from '../db';
 import { getInboundApiKey } from '../../bolt/utils/config';
 import { parseEmailContent } from '../../bolt/utils/email-parser';
-import { threadStorage } from '../../bolt/utils/thread-storage';
+import { threadStorage, type EmailRecipients } from '../../bolt/utils/thread-storage';
 import { installationStore } from '../../bolt/utils/installation-store';
 
 // Development mode - saves POST payloads to .data/requests/ for replay testing
@@ -92,6 +92,27 @@ export default eventHandler(async (event) => {
     console.log('[INBOUND] 📝 Parsing email content...');
     const { text: cleanedText, images } = parseEmailContent(email);
     console.log(`[INBOUND] 📝 Parsed ${cleanedText.length} chars, ${images.length} images`);
+
+    // Extract recipient information for reply-all functionality
+    const recipients: EmailRecipients = {
+      to: email.to?.addresses?.map((addr) => ({
+        name: addr.name ?? undefined,
+        address: addr.address ?? '',
+      })).filter((addr) => addr.address) || [],
+      // biome-ignore lint/suspicious/noExplicitAny: Inbound SDK types may not include cc
+      cc: (email as any).cc?.addresses?.map((addr: any) => ({
+        name: addr.name ?? undefined,
+        address: addr.address ?? '',
+      })).filter((addr: { address: string }) => addr.address),
+      from: fromAddress
+        ? {
+            name: fromAddress.name ?? undefined,
+            address: fromAddress.address ?? '',
+          }
+        : undefined,
+    };
+
+    console.log(`[INBOUND] 📧 Recipients - To: ${recipients.to.length}, CC: ${recipients.cc?.length || 0}`);
 
     // Check if this email is part of an existing thread
     const inboundThreadId = email.threadId;
@@ -357,14 +378,21 @@ export default eventHandler(async (event) => {
         });
 
         // Store thread mapping if this is the first message in a thread
-        if (inboundThreadId && response.ts && !slackThreadTs) {
+        const finalSlackThreadTs = response.ts || slackThreadTs;
+        if (inboundThreadId && finalSlackThreadTs && !slackThreadTs) {
           console.log('[INBOUND] 💾 Storing new thread mapping...');
-          await threadStorage.set(inboundThreadId, response.ts, email.id);
-          console.log(`[THREAD MAPPING] ✅ Created new: ${inboundThreadId} -> ${response.ts}`);
+          await threadStorage.set(inboundThreadId, finalSlackThreadTs, email.id);
+          // Store recipients for reply-all functionality
+          await threadStorage.setEmailRecipients(finalSlackThreadTs, recipients);
+          console.log(`[THREAD MAPPING] ✅ Created new: ${inboundThreadId} -> ${finalSlackThreadTs}`);
           console.log(`  Email ID: ${email.id}`);
+          console.log(`  Recipients stored: To=${recipients.to.length}, CC=${recipients.cc?.length || 0}`);
         } else if (inboundThreadId && slackThreadTs) {
+          // Update recipients for existing thread (in case this is a new message with different recipients)
+          await threadStorage.setEmailRecipients(slackThreadTs, recipients);
           console.log(`[THREAD MAPPING] ℹ️  Using existing: ${inboundThreadId} -> ${slackThreadTs}`);
           console.log(`  Email ID: ${email.id}`);
+          console.log(`  Recipients updated: To=${recipients.to.length}, CC=${recipients.cc?.length || 0}`);
         }
       } catch (error) {
         console.error(`[INBOUND] ❌ Error posting to workspace ${route.teamId}:`, error);

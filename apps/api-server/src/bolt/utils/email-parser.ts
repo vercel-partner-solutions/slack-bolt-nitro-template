@@ -140,14 +140,35 @@ function removeSignaturesFromHtml(html: string): string {
 }
 
 /**
+ * Remove blockquote/quoted sections from HTML before extracting images
+ * This prevents images from quoted emails (replies) from being included
+ */
+function removeBlockquotesFromHtml(html: string): string {
+  let cleaned = html;
+
+  // Remove blockquote elements (commonly used for quoted replies)
+  // This handles both <blockquote> and <blockquote type="cite"> (Apple Mail format)
+  cleaned = cleaned.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '');
+
+  // Also handle quoted content in divs with cite attributes
+  cleaned = cleaned.replace(/<div[^>]*type=["']cite["'][^>]*>[\s\S]*?<\/div>/gi, '');
+
+  return cleaned;
+}
+
+/**
  * Extract image URLs from HTML content
+ * NOTE: Images within blockquotes/quoted sections are excluded
  */
 function extractImagesFromHtml(html: string): string[] {
+  // First, remove blockquotes to exclude images from quoted/replied-to emails
+  const htmlWithoutQuotes = removeBlockquotesFromHtml(html);
+
   const images: string[] = [];
 
   // Simple regex to extract img src URLs
   const imgRegex = /<img[^>]+src=["']([^"']+)["']/gi;
-  let match: RegExpExecArray | null = imgRegex.exec(html);
+  let match: RegExpExecArray | null = imgRegex.exec(htmlWithoutQuotes);
 
   while (match !== null) {
     const url = match[1];
@@ -160,7 +181,7 @@ function extractImagesFromHtml(html: string): string[] {
     ) {
       images.push(url);
     }
-    match = imgRegex.exec(html);
+    match = imgRegex.exec(htmlWithoutQuotes);
   }
 
   return images;

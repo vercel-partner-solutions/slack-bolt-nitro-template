@@ -138,20 +138,166 @@ export const emailThreadReply = async ({
       }
     }
     
-    const generatedEmail = `${realName} <${generatedUsername}@${sendingDomain}>`;
+    const senderEmailAddress = `${generatedUsername}@${sendingDomain}`;
+    const generatedEmail = `${realName} <${senderEmailAddress}>`;
 
     logger.info(`Sending email from: ${generatedEmail} (domain: ${sendingDomain})`);
+
+    // Ensure sender's email route exists (auto-create if missing)
+    if (teamId) {
+      try {
+        const normalizedSenderEmail = senderEmailAddress.toLowerCase();
+        const existingRoute = await db
+          .select()
+          .from(schema.emailRoutes)
+          .where(eq(schema.emailRoutes.emailAddress, normalizedSenderEmail))
+          .limit(1);
+
+        if (existingRoute.length === 0) {
+          logger.info(`No email route found for ${senderEmailAddress}, auto-creating...`);
+          
+          // Get workspace config to find endpoint ID
+          const workspaceConfig = await db
+            .select()
+            .from(schema.workspaceConfig)
+            .where(eq(schema.workspaceConfig.teamId, teamId))
+            .limit(1);
+
+          const endpointId = workspaceConfig[0]?.inboundEndpointId;
+          if (!endpointId) {
+            logger.warn(`No endpoint ID found for workspace ${teamId}, cannot auto-create email route`);
+          } else {
+            // Get channel ID from event
+            const channelId = 'channel' in event ? event.channel : null;
+            
+            // Parse email to get domain
+            const emailParts = senderEmailAddress.split('@');
+            if (emailParts.length === 2) {
+              const domain = emailParts[1];
+              const inboundApiKey = getInboundApiKey();
+
+              // Get domain ID from Inbound API
+              const domainsResponse = await fetch('https://inbound.new/api/v2/domains', {
+                method: 'GET',
+                headers: {
+                  Authorization: `Bearer ${inboundApiKey}`,
+                  'Content-Type': 'application/json',
+                },
+              });
+
+              if (domainsResponse.ok) {
+                const domainsData = (await domainsResponse.json()) as { data?: Array<{ domain: string; id: string }> };
+                const domainInfo = domainsData.data?.find((d: { domain: string }) => d.domain === domain);
+
+                if (domainInfo?.id) {
+                  // Create email address in Inbound.new
+                  const emailResponse = await fetch('https://inbound.new/api/v2/email-addresses', {
+                    method: 'POST',
+                    headers: {
+                      Authorization: `Bearer ${inboundApiKey}`,
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      address: senderEmailAddress,
+                      domainId: domainInfo.id,
+                      endpointId,
+                      isActive: true,
+                    }),
+                  });
+
+                  if (emailResponse.ok) {
+                    // Create route in database
+                    await db.insert(schema.emailRoutes).values({
+                      emailAddress: normalizedSenderEmail,
+                      teamId,
+                      channelId: channelId || null,
+                      isActive: true,
+                    });
+
+                    logger.info(`✅ Auto-created email route for ${senderEmailAddress}`);
+                  } else {
+                    const errorData = (await emailResponse.json().catch(() => ({}))) as { error?: string };
+                    logger.warn(`Failed to create email address in Inbound.new: ${errorData.error || emailResponse.statusText}`);
+                  }
+                } else {
+                  logger.warn(`Domain ${domain} not found in Inbound.new account`);
+                }
+              } else {
+                logger.warn('Failed to fetch domains from Inbound.new');
+              }
+            }
+          }
+        } else {
+          logger.info(`Email route already exists for ${senderEmailAddress}`);
+        }
+      } catch (error) {
+        logger.warn('Error checking/creating email route:', error);
+        // Continue with reply even if route creation fails
+      }
+    }
+
+    // Retrieve original email recipients for reply-all
+    const recipients = await threadStorage.getEmailRecipients(event.thread_ts);
+    
+    // Build reply-all recipient list
+    // In reply-all: original sender goes to "to", all original to/cc recipients go to "to" and "cc"
+    let replyTo: string[] = [];
+    let replyCc: string[] = [];
+
+    if (recipients) {
+      // Original sender should be in "to"
+      if (recipients.from?.address) {
+        replyTo.push(recipients.from.address);
+      }
+
+      // All original "to" recipients (excluding sender) go to "to"
+      for (const toRecipient of recipients.to) {
+        if (toRecipient.address !== recipients.from?.address) {
+          replyTo.push(toRecipient.address);
+        }
+      }
+
+      // All original "cc" recipients go to "cc"
+      if (recipients.cc) {
+        for (const ccRecipient of recipients.cc) {
+          if (ccRecipient.address !== recipients.from?.address) {
+            replyCc.push(ccRecipient.address);
+          }
+        }
+      }
+
+      logger.info(`Reply-all recipients - To: ${replyTo.length}, CC: ${replyCc.length}`);
+    } else {
+      logger.info('No recipient information found, sending simple reply');
+    }
 
     // Send reply via Inbound
     const inbound = new Inbound(getInboundApiKey());
 
     logger.info(`Sending email reply to thread ${inboundThreadId} (email ${emailId})`);
 
-    const response = await inbound.reply(emailId, {
+    // Build reply options with recipients for reply-all
+    const replyOptions: {
+      html: string;
+      text: string;
+      from: string;
+      to?: string[];
+      cc?: string[];
+    } = {
       html: messageText, // Use HTML format to support inline images for custom emojis
       text: messageText.replace(/<img[^>]*>/g, ''), // Fallback plain text without img tags
       from: generatedEmail,
-    });
+    };
+
+    // Add recipients if we have them (reply-all functionality)
+    if (replyTo.length > 0) {
+      replyOptions.to = replyTo;
+    }
+    if (replyCc.length > 0) {
+      replyOptions.cc = replyCc;
+    }
+
+    const response = await inbound.reply(emailId, replyOptions);
 
     logger.info(`Email reply sent successfully: ${response.data?.id}`);
 

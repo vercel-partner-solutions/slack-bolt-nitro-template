@@ -2,6 +2,9 @@ import { eventHandler, createError, getRouterParam, readBody } from 'h3';
 import { validateInternalRequest } from '../../../../bolt/middleware/validate-internal-request';
 import { installationStore } from '../../../../bolt/utils/installation-store';
 import { WebClient } from '@slack/web-api';
+import { db } from '../../../db';
+import { workspaceConfig } from '@slackbound/db';
+import { eq } from 'drizzle-orm';
 
 /**
  * Create a Slack channel in a workspace using the bot token
@@ -32,11 +35,32 @@ export default eventHandler(async (event) => {
     }
     
     // Validate channel name (Slack requirements)
-    const channelName = name.trim().toLowerCase();
+    let channelName = name.trim().toLowerCase();
+    
+    // Fetch workspace config to get channel name prefix
+    const config = await db
+      .select()
+      .from(workspaceConfig)
+      .where(eq(workspaceConfig.teamId, teamId))
+      .limit(1);
+    
+    // Get prefix (default to "ext-inbd-*" if not set)
+    const prefix = config[0]?.channelNamePrefix || 'ext-inbd-*';
+    
+    // Apply prefix: if prefix contains "*", replace it with channel name, otherwise prepend
+    if (prefix.includes('*')) {
+      channelName = prefix.replace('*', channelName);
+    } else {
+      channelName = `${prefix}${channelName}`;
+    }
+    
+    // Normalize channel name for Slack (lowercase, no spaces, hyphens allowed)
+    channelName = channelName.toLowerCase().replace(/\s+/g, '-');
+    
     if (channelName.length < 1 || channelName.length > 80) {
       throw createError({
         statusCode: 400,
-        message: 'Channel name must be between 1 and 80 characters',
+        message: 'Channel name must be between 1 and 80 characters after applying prefix',
       });
     }
     
