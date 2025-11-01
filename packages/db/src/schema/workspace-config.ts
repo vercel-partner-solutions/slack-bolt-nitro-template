@@ -11,8 +11,17 @@ export const workspaceConfig = pgTable("workspace_config", {
   defaultChannelId: text("default_channel_id"),
   defaultChannelName: text("default_channel_name"),
   
+  // Inbound.new endpoint ID for this workspace
+  inboundEndpointId: text("inbound_endpoint_id"),
+  
   // Feature flags
   emailIntegrationEnabled: boolean("email_integration_enabled").notNull().default(true),
+  
+  // Message identity setting
+  shouldShowFullEmail: boolean("should_show_full_email").notNull().default(false),
+  
+  // Email sending domain for replies
+  sendingDomain: text("sending_domain"),
   
   // Timestamps
   createdAt: timestamp("created_at").notNull().defaultNow(),

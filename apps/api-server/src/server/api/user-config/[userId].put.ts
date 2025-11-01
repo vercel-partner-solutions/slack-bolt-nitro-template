@@ -2,6 +2,7 @@ import { eventHandler, getRouterParam, readBody } from "h3";
 import { eq } from "drizzle-orm";
 import { db } from "../../db";
 import { userConfig } from "@slackbound/db";
+import { validateInternalRequest } from "../../../bolt/middleware/validate-internal-request";
 
 interface UpdateConfigBody {
 	sendingDomain?: string;
@@ -9,6 +10,9 @@ interface UpdateConfigBody {
 }
 
 export default eventHandler(async (event) => {
+	// Validate internal API key
+	await validateInternalRequest(event);
+	
 	try {
 		const userId = getRouterParam(event, "userId");
 

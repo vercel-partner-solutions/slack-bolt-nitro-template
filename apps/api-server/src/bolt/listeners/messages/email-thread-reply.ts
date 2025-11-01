@@ -3,6 +3,8 @@ import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from '@slack/bolt';
 import { getInboundApiKey } from '../../utils/config';
 import { convertSlackEmojisToEmojis } from '../../utils/slack-emoji-converter';
 import { threadStorage } from '../../utils/thread-storage';
+import { db, schema } from '../../../server/db';
+import { eq } from 'drizzle-orm';
 
 /**
  * Handles when a user replies in a Slack thread to send an email reply via Inbound
@@ -111,10 +113,34 @@ export const emailThreadReply = async ({
     };
 
     const generatedUsername = generateUsername(realName);
-    const sendingDomain = 'inbound.new'; // THIS IS HARDCODED FOR NOW WILL NEED TO UPDATE THIS
-    const generatedEmail = `${generatedUsername}@${sendingDomain}`;
+    
+    // Get teamId from event to fetch workspace config
+    // Slack event types don't expose team_id in the type definition, but it exists at runtime
+    // Use type-safe access instead of any
+    const eventWithTeam = event as typeof event & { team?: string; team_id?: string };
+    const teamId = eventWithTeam.team || eventWithTeam.team_id;
+    
+    // Fetch workspace config to get sending domain
+    let sendingDomain = 'inbound.new'; // Default fallback
+    if (teamId) {
+      try {
+        const workspaceConfig = await db
+          .select()
+          .from(schema.workspaceConfig)
+          .where(eq(schema.workspaceConfig.teamId, teamId))
+          .limit(1);
+        
+        if (workspaceConfig.length > 0 && workspaceConfig[0].sendingDomain) {
+          sendingDomain = workspaceConfig[0].sendingDomain;
+        }
+      } catch (error) {
+        logger.warn('Could not fetch workspace config for sending domain, using default:', error);
+      }
+    }
+    
+    const generatedEmail = `${realName} <${generatedUsername}@${sendingDomain}>`;
 
-    logger.info(`Sending email from: ${generatedEmail}`);
+    logger.info(`Sending email from: ${generatedEmail} (domain: ${sendingDomain})`);
 
     // Send reply via Inbound
     const inbound = new Inbound(getInboundApiKey());

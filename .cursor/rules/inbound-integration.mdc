@@ -1,5 +1,5 @@
 ---
-globs: src/server/api/inbound.post.ts,src/bolt/utils/config.ts
+globs: apps/api-server/src/server/api/inbound.post.ts,apps/api-server/src/bolt/utils/config.ts
 description: Inbound.new email integration guide
 ---
 

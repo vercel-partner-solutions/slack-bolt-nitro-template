@@ -29,6 +29,7 @@ interface CommandPaletteProps {
   onOpenChange: (open: boolean) => void;
   domains: Array<{ id: string; domain: string; status: string }>;
   onChannelCreate: (channelName: string, emailAddress: string) => void;
+  initialStep?: Step;
 }
 
 export function CommandPalette({
@@ -36,8 +37,18 @@ export function CommandPalette({
   onOpenChange,
   domains,
   onChannelCreate,
+  initialStep,
 }: CommandPaletteProps) {
-  const [step, setStep] = React.useState<Step>("root");
+  const [step, setStep] = React.useState<Step>(initialStep || "root");
+  
+  // Update step when initialStep prop changes or when opening
+  React.useEffect(() => {
+    if (open && initialStep) {
+      setStep(initialStep);
+    } else if (!open) {
+      setStep("root");
+    }
+  }, [open, initialStep]);
   const [emailPrefix, setEmailPrefix] = React.useState("");
   const [selectedDomain, setSelectedDomain] = React.useState<string>("");
   const [search, setSearch] = React.useState("");
@@ -97,26 +108,29 @@ export function CommandPalette({
     try {
       // Step 1: Create Slack channel
       const channelResult = await createSlackChannel(channelName);
-      if (channelResult.success) {
-        setCreatingSteps((prev) => ({ ...prev, slackChannel: true }));
+      if (!channelResult.success || !channelResult.data?.id) {
+        throw new Error(channelResult.error || "Failed to create Slack channel");
       }
+      setCreatingSteps((prev) => ({ ...prev, slackChannel: true }));
 
       // Step 2: Create email address
       const emailResult = await createEmailAddress(emailAddress);
-      if (emailResult.success) {
-        setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
+      if (!emailResult.success || !emailResult.emailId) {
+        throw new Error(emailResult.error || "Failed to create email address");
       }
+      setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
 
-      // Step 3: Link channel and email
-      if (channelResult.success && emailResult.success) {
+      // Step 3: Link channel and email (save to database)
         const linkResult = await linkChannelAndEmail(
-          channelResult.channelId,
-          emailResult.emailId
+        channelResult.data.id,
+        emailResult.emailId,
+        emailAddress,
+        channelResult.data.name // Pass channel name
         );
-        if (linkResult.success) {
-          setCreatingSteps((prev) => ({ ...prev, linking: true }));
-        }
+      if (!linkResult.success) {
+        throw new Error(linkResult.error || "Failed to link channel and email");
       }
+          setCreatingSteps((prev) => ({ ...prev, linking: true }));
 
       // Complete - close dialog and call callback
       setTimeout(() => {
@@ -142,6 +156,7 @@ export function CommandPalette({
         emailAddress: false,
         linking: false,
       });
+      // You might want to show an error message to the user here
     }
   }, [emailPrefix, selectedDomain, onChannelCreate, onOpenChange]);
 

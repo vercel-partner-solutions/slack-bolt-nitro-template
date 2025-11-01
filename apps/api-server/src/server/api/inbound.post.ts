@@ -2,7 +2,7 @@ import type { InboundWebhookPayload } from '@inboundemail/sdk';
 import { eventHandler, readBody } from 'h3';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import WebClient from '@slack/bolt';
+import { WebClient } from '@slack/web-api';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db';
 import { getInboundApiKey } from '../../bolt/utils/config';
@@ -151,13 +151,6 @@ export default eventHandler(async (event) => {
     // Generate avatar URL using inbound.new avatar API
     const avatarUrl = getAvatarUrl(fromName, fromEmail);
     
-    // Try to find a matching Slack user by email to check their config
-    let shouldShowEmail = false; // Default to showing email
-    
-    
-    // Create username based on shouldShowEmail setting
-    const fullUsername = shouldShowEmail ? `${fromName} <${fromEmail}>` : fromName;
-
     // Download and store attachments locally, serve via our API
     // This allows images and files to appear in the message with custom username/icon
     const imageUrls: Array<{ url: string; filename: string }> = [];
@@ -259,7 +252,6 @@ export default eventHandler(async (event) => {
     }
 
     console.log('[INBOUND] 👤 Bot appearance:');
-    console.log(`  Username: ${fullUsername}`);
     console.log(`  Avatar: ${avatarUrl}`);
 
     // Look up email route to determine workspace and channel
@@ -272,10 +264,13 @@ export default eventHandler(async (event) => {
       };
     }
 
-    console.log(`[INBOUND] 🔍 Looking up route for: ${toEmail}`);
+    // Normalize email to lowercase for case-insensitive lookup
+    // (emails are stored in lowercase, but we normalize here for safety)
+    const normalizedEmail = toEmail.toLowerCase();
+    console.log(`[INBOUND] 🔍 Looking up route for: ${normalizedEmail}`);
 
     const routes = await db.query.emailRoutes.findMany({
-      where: eq(schema.emailRoutes.emailAddress, toEmail),
+      where: eq(schema.emailRoutes.emailAddress, normalizedEmail),
     });
 
     if (routes.length === 0) {
@@ -307,9 +302,17 @@ export default eventHandler(async (event) => {
         });
 
         // Create workspace-specific client
-        const workspaceClient = new WebClient({
-          token: installation.bot?.token!,
-        });
+        const workspaceClient = new WebClient(installation.bot?.token!);
+
+        // Fetch workspace config to determine username format
+        const workspaceConfig = await db
+          .select()
+          .from(schema.workspaceConfig)
+          .where(eq(schema.workspaceConfig.teamId, route.teamId))
+          .limit(1);
+        
+        const shouldShowFullEmail = workspaceConfig[0]?.shouldShowFullEmail ?? false;
+        const fullUsername = shouldShowFullEmail ? `${fromName} <${fromEmail}>` : fromName;
 
         // Determine target (channel or DM)
         const target = route.channelId || route.userId;
@@ -321,6 +324,7 @@ export default eventHandler(async (event) => {
         console.log(
           `[INBOUND] 📤 Posting to ${route.channelId ? 'channel' : 'user'}: ${target}${slackThreadTs ? ` (thread: ${slackThreadTs})` : ''}`,
         );
+        console.log(`[INBOUND] 👤 Username format: ${shouldShowFullEmail ? 'full email' : 'name only'}`);
 
         const totalAttachments = imageUrls.length + fileLinks.length;
         if (totalAttachments > 0) {
@@ -331,7 +335,7 @@ export default eventHandler(async (event) => {
         console.log('[INBOUND] 🔍 Blocks being sent to Slack:');
         console.log(JSON.stringify(blocks, null, 2));
 
-        const response = await workspaceClient.client.chat.postMessage({
+        const response = await workspaceClient.chat.postMessage({
           channel: target,
           text: cleanedText,
           blocks, // Message blocks (includes images and file links)

@@ -1,7 +1,7 @@
 ---
-globs: src/bolt/**/*.ts
+globs: apps/api-server/*
+alwaysApply: false
 ---
-
 # Slack Bolt Patterns
 
 ## Listener Callback Pattern

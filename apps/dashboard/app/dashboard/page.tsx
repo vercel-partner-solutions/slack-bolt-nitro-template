@@ -1,21 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { signOut, useSession } from "@/lib/auth-client";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Lato } from "next/font/google";
-import Image from "next/image";
-import Link from "next/link";
-import {
-  getCurrentUserConfig,
-  updateUserConfig,
-  updateInboundApiKey,
-  fetchInboundDomains,
-  fetchSlackChannels,
-  getSlackWorkspaceInfo,
-  checkBotInstallation,
-} from "@/app/actions/user-config";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -23,98 +11,267 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Lato } from "next/font/google";
+import Image from "next/image";
+import Link from "next/link";
+import {
+  getWorkspaceConfig,
+  updateWorkspaceConfig,
+  fetchInboundDomains,
+  fetchSlackChannels,
+  getSlackWorkspaceInfo,
+  checkBotInstallation,
+  createSlackChannel,
+  fetchEmailRoutes,
+  deleteEmailRoute,
+  getLocalUserConfig,
+} from "@/app/actions/user-config";
+import { Input } from "@/components/ui/input";
 import { LottieIcon } from "@/components/lotties/lottie-icon";
 import slackLogoAnimation from "@/components/lotties/slack-logo.json";
 import configIconAnimation from "@/components/lotties/config-icon.json";
 import developerIconAnimation from "@/components/lotties/developer-icon.json";
 import { CommandPalette } from "@/components/command-palette";
 import { redirect } from "next/navigation";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const lato = Lato({ subsets: ["latin"], weight: ["400", "700"] });
 
 export default function DashboardPage() {
   const { data: session, isPending } = useSession();
+  const queryClient = useQueryClient();
 
   const user = session?.user;
   const userName = user?.name ?? "";
   const userEmail = user?.email ?? "";
   const userImage = user?.image ?? "";
-  const [identityMode, setIdentityMode] = useState<"name-email" | "name-only">(
-    "name-email"
-  );
-  const [isLoading, setIsLoading] = useState(false);
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [inboundApiKey, setInboundApiKey] = useState<string>("");
-  const [inboundApiKeyInput, setInboundApiKeyInput] = useState<string>("");
-  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
-  const [domains, setDomains] = useState<
-    Array<{ id: string; domain: string; status: string }>
-  >([]);
-  const [isLoadingDomains, setIsLoadingDomains] = useState(false);
-  const [selectedDomain, setSelectedDomain] = useState<string>("");
-  const [slackChannels, setSlackChannels] = useState<
-    Array<{
-      id: string;
-      name: string;
-      isPrivate: boolean;
-      isMember: boolean;
-      numMembers: number;
-    }>
-  >([]);
-  const [isLoadingChannels, setIsLoadingChannels] = useState(false);
-  const [channelsError, setChannelsError] = useState<string | null>(null);
-  const [workspaceInfo, setWorkspaceInfo] = useState<{
-    teamId: string;
-    teamName: string;
-    teamUrl: string;
-    userId: string;
-    userName: string;
-  } | null>(null);
-  const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
-  const [botInstalled, setBotInstalled] = useState<boolean | null>(null);
-  const [isCheckingBot, setIsCheckingBot] = useState(false);
-  // Mock channel mappings data with different colors
-  const colors = ["bg-blue-500", "bg-purple-500", "bg-green-500", "bg-orange-500"];
-  const [channelMappings, setChannelMappings] = useState<
-    Array<{
-      channelName: string;
-      emailAddress: string;
-      conversations: number;
-      messages: number;
-      color: string;
-    }>
-  >([
-    {
-      channelName: "#inb-ext-support",
-      emailAddress: "support@slackbound.com",
-      conversations: 24,
-      messages: 142,
-      color: colors[0],
-    },
-    {
-      channelName: "#inb-ext-sales-team",
-      emailAddress: "sales@slackbound.com",
-      conversations: 8,
-      messages: 39,
-      color: colors[1],
-    },
-  ]);
-  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
-  // Handle channel creation (UI only for now)
+  // Fetch workspace config
+  const {
+    data: workspaceConfigResult,
+    isLoading: isInitialLoading,
+    error: configError,
+  } = useQuery({
+    queryKey: ["workspaceConfig"],
+    queryFn: getWorkspaceConfig,
+    enabled: !isPending && !!user,
+    select: (result) => result.success ? result.data : null,
+  });
+
+  const identityMode: "name-email" | "name-only" =
+    workspaceConfigResult?.shouldShowFullEmail === true ? "name-email" : "name-only";
+
+  // Sync sendingDomain state with query data
+  useEffect(() => {
+    if (workspaceConfigResult?.sendingDomain !== undefined) {
+      setSendingDomain(workspaceConfigResult.sendingDomain || "");
+    }
+  }, [workspaceConfigResult?.sendingDomain]);
+
+  // Fetch user config for API key (needed for CommandPalette domains)
+  const {
+    data: workspaceInfoForUserId,
+  } = useQuery({
+    queryKey: ["workspaceInfoForUserId"],
+    queryFn: getSlackWorkspaceInfo,
+    enabled: !isPending && !!user,
+    select: (result) => result.success && result.data ? result.data.userId : null,
+  });
+
+  const {
+    data: userConfig,
+  } = useQuery({
+    queryKey: ["userConfig", workspaceInfoForUserId],
+    queryFn: async () => {
+      if (!workspaceInfoForUserId) return null;
+      // Import getLocalUserConfig dynamically to avoid circular dependency
+      const { getLocalUserConfig } = await import("@/app/actions/user-config");
+      return await getLocalUserConfig(workspaceInfoForUserId);
+    },
+    enabled: !isPending && !!user && !!workspaceInfoForUserId,
+  });
+  const inboundApiKey = userConfig?.inboundApiKey ?? "";
+
+  // Fetch domains for CommandPalette and sending domain dropdown
+  const {
+    data: domainsData,
+    isLoading: isLoadingDomains,
+  } = useQuery({
+    queryKey: ["domains", inboundApiKey],
+    queryFn: () => fetchInboundDomains(inboundApiKey),
+    enabled: !isPending && !!user && !!inboundApiKey,
+    select: (result) => (result.success ? result.data : []),
+  });
+  const domains = domainsData ?? [];
+
+  // Fetch Slack channels
+  const {
+    data: channelsResult,
+    isLoading: isLoadingChannels,
+  } = useQuery({
+    queryKey: ["slackChannels"],
+    queryFn: fetchSlackChannels,
+    enabled: !isPending && !!user,
+  });
+  const slackChannels = channelsResult?.success ? (channelsResult.data ?? []) : [];
+  const channelsError = channelsResult?.success === false ? channelsResult : null;
+
+  // Fetch workspace info
+  const {
+    data: workspaceResult,
+    isLoading: isLoadingWorkspace,
+  } = useQuery({
+    queryKey: ["workspaceInfo"],
+    queryFn: getSlackWorkspaceInfo,
+    enabled: !isPending && !!user,
+  });
+  const workspaceInfo = workspaceResult?.success ? workspaceResult.data : null;
+
+  // Check bot installation
+  const {
+    data: botInstallationData,
+    isLoading: isCheckingBot,
+  } = useQuery({
+    queryKey: ["botInstallation"],
+    queryFn: checkBotInstallation,
+    enabled: !isPending && !!user,
+  });
+  const botInstalled =
+    botInstallationData?.success && "installed" in botInstallationData
+      ? botInstallationData.installed
+      : null;
+
+  // Mutations
+  const updateWorkspaceConfigMutation = useMutation({
+    mutationFn: updateWorkspaceConfig,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workspaceConfig"] });
+    },
+  });
+
+  const createChannelMutation = useMutation({
+    mutationFn: ({ name, isPrivate }: { name: string; isPrivate: boolean }) =>
+      createSlackChannel(name, isPrivate),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["slackChannels"] });
+      setTestChannelName("");
+      setTestChannelIsPrivate(false);
+    },
+  });
+
+  // Fetch email routes
+  const {
+    data: emailRoutesResult,
+    isLoading: isLoadingRoutes,
+  } = useQuery({
+    queryKey: ["emailRoutes"],
+    queryFn: fetchEmailRoutes,
+    enabled: !isPending && !!user,
+    select: (result: Awaited<ReturnType<typeof fetchEmailRoutes>>) =>
+      result.success ? (result.data ?? []) : [],
+  });
+  const emailRoutes = emailRoutesResult ?? [];
+
+  // Delete email route mutation with optimistic updates
+  const deleteRouteMutation = useMutation({
+    mutationFn: deleteEmailRoute,
+    // Optimistically update the cache before the mutation completes
+    onMutate: async (emailAddress: string) => {
+      // Cancel any outgoing refetches (so they don't overwrite our optimistic update)
+      await queryClient.cancelQueries({ queryKey: ["emailRoutes"] });
+
+      // Snapshot the previous value for rollback
+      const previousRoutes = queryClient.getQueryData<Awaited<ReturnType<typeof fetchEmailRoutes>>>(
+        ["emailRoutes"]
+      );
+
+      // Optimistically update the cache by removing the route
+      queryClient.setQueryData<Awaited<ReturnType<typeof fetchEmailRoutes>>>(
+        ["emailRoutes"],
+        (old) => {
+          if (!old || !old.success || !old.data) return old;
+          
+          return {
+            success: true,
+            data: old.data.filter(
+              (route) => route.emailAddress.toLowerCase() !== emailAddress.toLowerCase()
+            ),
+          };
+        }
+      );
+
+      // Close the dialog immediately
+      setEmailToDelete(null);
+
+      // Return context with the previous value for rollback
+      return { previousRoutes };
+    },
+    // If the mutation fails, roll back to the previous value
+    onError: (err, emailAddress, context) => {
+      if (context?.previousRoutes) {
+        queryClient.setQueryData(["emailRoutes"], context.previousRoutes);
+      }
+    },
+    // Always refetch after error or success to ensure consistency
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["emailRoutes"] });
+    },
+  });
+
+  // Local state for UI
+  const [error, setError] = useState<string | null>(null);
+  const [sendingDomain, setSendingDomain] = useState<string>("");
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [createRouteInitialStep, setCreateRouteInitialStep] = useState<"root" | "email-address" | "channel-name" | "creating" | undefined>(undefined);
+  const [channelSearchQuery, setChannelSearchQuery] = useState<string>("");
+  const [hasScrollableChannels, setHasScrollableChannels] = useState(false);
+  const channelsListRef = useRef<HTMLDivElement>(null);
+  const [emailToDelete, setEmailToDelete] = useState<string | null>(null);
+
+  // Track which email is currently being deleted
+  const deletingEmail = deleteRouteMutation.isPending ? emailToDelete : null;
+  
+  // Channel creation test state
+  const [testChannelName, setTestChannelName] = useState("");
+  const [testChannelIsPrivate, setTestChannelIsPrivate] = useState(false);
+
+  // Filter channels based on search
+  const filteredChannels = slackChannels.filter((channel) =>
+    channel.name.toLowerCase().includes(channelSearchQuery.toLowerCase())
+  );
+
+  // Check if there's scrollable content
+  useEffect(() => {
+    if (channelsListRef.current) {
+      const hasOverflow = channelsListRef.current.scrollHeight > channelsListRef.current.clientHeight;
+      const isAtBottom = channelsListRef.current.scrollHeight - channelsListRef.current.scrollTop <= channelsListRef.current.clientHeight + 1;
+      setHasScrollableChannels(hasOverflow && !isAtBottom);
+    }
+  }, [filteredChannels.length, channelSearchQuery]);
+
+  // Handle channel creation - invalidate routes query to refresh list
   const handleChannelCreate = (channelName: string, emailAddress: string) => {
-    const color = colors[channelMappings.length % colors.length];
-    setChannelMappings([
-      ...channelMappings,
-      {
-        channelName: `#inb-ext-${channelName}`,
-        emailAddress,
-        conversations: 0,
-        messages: 0,
-        color,
-      },
-    ]);
+    queryClient.invalidateQueries({ queryKey: ["emailRoutes"] });
+  };
+
+  // Handle route deletion
+  const handleDeleteRoute = (emailAddress: string) => {
+    setEmailToDelete(emailAddress);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (emailToDelete) {
+      await deleteRouteMutation.mutateAsync(emailToDelete);
+    }
   };
 
   const fallbackInitials = (userName || userEmail || "U")
@@ -124,158 +281,38 @@ export default function DashboardPage() {
     .slice(0, 2)
     .toUpperCase();
 
-  // Fetch domains from Inbound.new
-  const fetchDomains = async (apiKey: string) => {
-    if (!apiKey) return;
-
-    setIsLoadingDomains(true);
-    const result = await fetchInboundDomains(apiKey);
-    setIsLoadingDomains(false);
-
-    if (result.success && result.data) {
-      setDomains(result.data);
-    } else {
-      console.error("Failed to fetch domains:", result.error);
-    }
-  };
-
-  // Fetch Slack channels
-  const loadSlackChannels = async () => {
-    setIsLoadingChannels(true);
-    setChannelsError(null);
-    const result = await fetchSlackChannels();
-    setIsLoadingChannels(false);
-
-    if (result.success && result.data) {
-      setSlackChannels(result.data);
-    } else {
-      // Store both error code and message for better UI handling
-      if (result.error === "bot_not_installed") {
-        setChannelsError("bot_not_installed");
-      } else {
-        setChannelsError(result.error || result.message || "Failed to load channels");
-      }
-    }
-  };
-
-  // Fetch Slack workspace info
-  const loadWorkspaceInfo = async () => {
-    setIsLoadingWorkspace(true);
-    const result = await getSlackWorkspaceInfo();
-    setIsLoadingWorkspace(false);
-
-    if (result.success && result.data) {
-      setWorkspaceInfo(result.data);
-    }
-  };
-
-  // Check bot installation status
-  const loadBotStatus = async () => {
-    setIsCheckingBot(true);
-    const result = await checkBotInstallation();
-    setIsCheckingBot(false);
-
-    if (result.success && 'installed' in result) {
-      setBotInstalled(result.installed);
-    }
-  };
-
-  // Fetch initial config
-  useEffect(() => {
-    if (!isPending && user) {
-      setIsInitialLoading(true);
-      getCurrentUserConfig()
-        .then((config) => {
-          if (config) {
-            setIdentityMode(
-              config.shouldShowFullEmail ? "name-email" : "name-only"
-            );
-            if (config.inboundApiKey) {
-              setInboundApiKey(config.inboundApiKey);
-              // Fetch domains when API key is available
-              fetchDomains(config.inboundApiKey);
-            }
-            if (config.sendingDomain) {
-              setSelectedDomain(config.sendingDomain);
-            }
-          }
-        })
-        .catch((err) => {
-          console.error("Error fetching config:", err);
-          setError("Failed to load configuration");
-        })
-        .finally(() => {
-          setIsInitialLoading(false);
-        });
-
-      // Load Slack channels, workspace info, and bot status
-      loadSlackChannels();
-      loadWorkspaceInfo();
-      loadBotStatus();
-    }
-  }, [isPending, user]);
-
-  // Handle saving inbound API key
-  const handleSaveApiKey = async () => {
-    if (!inboundApiKeyInput.trim()) {
-      setError("Please enter an API key");
-      return;
-    }
-
-    setIsSavingApiKey(true);
-    setError(null);
-
-    const result = await updateInboundApiKey(inboundApiKeyInput.trim());
-
-    setIsSavingApiKey(false);
-
-    if (result.success) {
-      setInboundApiKey(inboundApiKeyInput.trim());
-      setInboundApiKeyInput("");
-      // Fetch domains after saving API key
-      await fetchDomains(inboundApiKeyInput.trim());
-    } else {
-      setError(result.error || "Failed to save API key");
-    }
-  };
-
-  // Handle domain selection
-  const handleDomainChange = async (domainId: string) => {
-    const domain = domains.find((d) => d.id === domainId);
-    if (!domain) return;
-
-    setSelectedDomain(domain.domain);
-    setIsLoading(true);
-    const result = await updateUserConfig({
-      sendingDomain: domain.domain,
-    });
-    setIsLoading(false);
-
-    if (!result.success) {
-      setError(result.error || "Failed to save domain selection");
-    }
-  };
-
   // Handle radio button change
   const handleIdentityModeChange = async (value: string) => {
     const newMode = value as "name-email" | "name-only";
-    const previousMode = identityMode;
-    setIdentityMode(newMode);
     setError(null);
 
-    setIsLoading(true);
-    const result = await updateUserConfig({
+    const result = await updateWorkspaceConfigMutation.mutateAsync({
       shouldShowFullEmail: newMode === "name-email",
     });
 
-    setIsLoading(false);
-
     if (!result.success) {
       setError(result.error || "Failed to save configuration");
-      // Revert to previous value
-      setIdentityMode(previousMode);
     }
   };
+
+  // Handle sending domain change
+  const handleSendingDomainChange = async (value: string) => {
+    setSendingDomain(value);
+    setError(null);
+
+    const result = await updateWorkspaceConfigMutation.mutateAsync({
+      sendingDomain: value.trim() || null,
+    });
+
+    if (!result.success) {
+      setError(result.error || "Failed to save sending domain");
+    }
+  };
+
+  // Extract error message from channels query
+  const channelsErrorMessage = channelsError?.error === "bot_not_installed"
+    ? "bot_not_installed"
+    : channelsError?.error || channelsError?.message || null;
 
   if (!user && !isPending) {
     redirect("/");
@@ -358,8 +395,8 @@ export default function DashboardPage() {
                     Loading channels...
                   </span>
                 </div>
-              ) : channelsError ? (
-                channelsError === "bot_not_installed" ? (
+              ) : channelsErrorMessage ? (
+                channelsErrorMessage === "bot_not_installed" ? (
                   <div className="rounded-md border border-orange-500/50 bg-orange-500/10 p-4">
                     <p className="text-sm font-medium text-orange-700 mb-3">
                       Bot Not Installed
@@ -377,7 +414,11 @@ export default function DashboardPage() {
                   </div>
                 ) : (
                   <div className="rounded-md border border-destructive/50 bg-destructive/10 p-4">
-                    <p className="text-sm text-destructive">{channelsError}</p>
+                    <p className="text-sm text-destructive">
+                      {typeof channelsErrorMessage === "string"
+                        ? channelsErrorMessage
+                        : "Failed to load channels"}
+                    </p>
                   </div>
                 )
               ) : slackChannels.length === 0 ? (
@@ -385,8 +426,37 @@ export default function DashboardPage() {
                   No channels found.
                 </p>
               ) : (
-                <div className="-mx-2 divide-y divide-border">
-                  {slackChannels.map((channel) => (
+                <div className="space-y-3">
+                  {/* Search Input */}
+                  <Input
+                    type="text"
+                    placeholder="Search channels..."
+                    value={channelSearchQuery}
+                    onChange={(e) => setChannelSearchQuery(e.target.value)}
+                    className="h-9 text-xs"
+                  />
+                  
+                  {/* Scrollable Channel List with fade */}
+                  <div className="relative">
+                    <div 
+                      ref={channelsListRef}
+                      className="-mx-2 divide-y divide-border max-h-[180px] overflow-y-auto"
+                      onScroll={() => {
+                        if (channelsListRef.current) {
+                          const hasOverflow = channelsListRef.current.scrollHeight > channelsListRef.current.clientHeight;
+                          const isAtBottom = channelsListRef.current.scrollHeight - channelsListRef.current.scrollTop <= channelsListRef.current.clientHeight + 1;
+                          setHasScrollableChannels(hasOverflow && !isAtBottom);
+                        }
+                      }}
+                    >
+                      {filteredChannels.length === 0 ? (
+                        <div className="px-2 py-4 text-center">
+                          <p className="text-sm text-muted-foreground">
+                            No channels match "{channelSearchQuery}"
+                          </p>
+                        </div>
+                      ) : (
+                        filteredChannels.map((channel) => (
                     <div
                       key={channel.id}
                       className="flex items-center justify-between px-2 py-3"
@@ -410,56 +480,113 @@ export default function DashboardPage() {
                         <span>{channel.numMembers} members</span>
                       </div>
                     </div>
-                  ))}
+                        ))
+                      )}
+                    </div>
+                    {/* Fade effect at bottom when there's more content to scroll */}
+                    {hasScrollableChannels && (
+                      <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-background via-background/80 to-transparent pointer-events-none" />
+                    )}
+                  </div>
+                  {channelSearchQuery && filteredChannels.length > 0 && (
+                    <p className="text-xs text-muted-foreground text-center">
+                      {filteredChannels.length} channel{filteredChannels.length !== 1 ? "s" : ""} found
+                    </p>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* Channels Card */}
+            {/* Email Routes Card */}
             <div className="rounded-lg border border-border bg-background p-6">
               <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 <span className="h-[1.25em] w-[1.25em]">
                   <LottieIcon animationData={slackLogoAnimation} />
                 </span>
-                Channels
+                Email Routes
               </h2>
               <p className="mb-6 text-sm text-muted-foreground">
-                Link Slack channels to email addresses. Emails sent to these addresses will be available in the channels.
+                Slack channels linked to email addresses. Emails sent to these addresses will be posted in the corresponding channels.
               </p>
               <hr className="my-6 border-border" />
+              {isLoadingRoutes ? (
+                <div className="flex items-center gap-3 py-4">
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  <span className="text-sm text-muted-foreground">
+                    Loading routes...
+                  </span>
+                </div>
+              ) : emailRoutes.length === 0 ? (
+                <div className="py-8 text-center space-y-4">
+                  <div>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      No email routes configured yet.
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Use the command palette (⌘K) to create a channel and email route.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreateRouteInitialStep("email-address");
+                      setIsCommandPaletteOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted/40"
+                  >
+                    <span>+</span>
+                    Create Route
+                  </button>
+                </div>
+              ) : (
               <div className="-mx-2 divide-y divide-border">
-                {channelMappings.map((mapping, index) => (
-                  <div key={index} className="flex items-center justify-between px-2 py-2">
-                    <div className="min-w-0 flex items-center gap-2">
+                  {emailRoutes.map((route) => (
+                    <div key={route.id} className="flex items-center justify-between px-2 py-3">
+                      <div className="min-w-0 flex-1 flex items-center gap-3">
+                        {/* Email Address */}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-xs text-muted-foreground">📧</span>
                       <span className="text-sm font-medium text-foreground truncate">
-                        {mapping.channelName}
-                      </span>
-                      <span className="text-xs text-muted-foreground">→</span>
-                      <span className="text-sm text-muted-foreground truncate">
-                        {mapping.emailAddress}
+                            {route.emailAddress}
                       </span>
                     </div>
-                    <div className="ml-4 flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
-                      <span>
-                        {mapping.conversations} conv{mapping.conversations !== 1 ? "s" : ""}
+                        
+                        {/* Arrow indicator */}
+                        <span className="text-xs text-muted-foreground flex-shrink-0">→</span>
+                        
+                        {/* Channel */}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-xs text-muted-foreground">#</span>
+                          <span className="text-sm font-medium text-foreground truncate">
+                            {route.channelName || route.channelId || "Unknown"}
                       </span>
-                      <span className="text-border">•</span>
-                      <span>
-                        {mapping.messages} msgs
-                      </span>
+                        </div>
+                        
+                        {/* Status indicator */}
+                        {route.isActive ? (
+                          <span className="flex-shrink-0 h-2 w-2 rounded-full bg-green-500" title="Active" />
+                        ) : (
+                          <span className="flex-shrink-0 h-2 w-2 rounded-full bg-gray-400" title="Inactive" />
+                        )}
+                      </div>
+                      <div className="ml-4 flex shrink-0 items-center gap-3">
                       <button
                         type="button"
-                        className="ml-3 underline hover:text-destructive"
+                          onClick={() => handleDeleteRoute(route.emailAddress)}
+                          disabled={deleteRouteMutation.isPending && deletingEmail === route.emailAddress}
+                          className="text-xs underline text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        Remove
+                          {deletingEmail === route.emailAddress ? "Removing..." : "Remove"}
                       </button>
                     </div>
                   </div>
                 ))}
               </div>
+              )}
             </div>
 
-            {/* Developer Card */}
+            {/* Developer Card - Only visible in development */}
+            {process.env.NODE_ENV === 'development' && (
             <div className="rounded-lg border border-border bg-background p-6">
               <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 <span className="h-[1.25em] w-[1.25em]">
@@ -530,7 +657,8 @@ export default function DashboardPage() {
                         </span>
                       </div>
                     ) : botInstalled === true ? (
-                      <div className="rounded-md border border-green-500/50 bg-green-500/10 p-3">
+                      <div>
+                        <div className="rounded-md border border-green-500/50 bg-green-500/10 p-3 mb-3">
                         <div className="flex items-center gap-2">
                           <div className="h-2 w-2 rounded-full bg-green-500" />
                           <p className="text-sm font-medium text-green-700">
@@ -540,6 +668,24 @@ export default function DashboardPage() {
                         <p className="mt-1 text-xs text-green-600">
                           The bot is active in your workspace
                         </p>
+                        </div>
+                        <Link
+                          href="/nextjs/api/slack/install"
+                          className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-muted/40 transition-colors"
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 54 54"
+                            className="h-5 w-5"
+                            fill="currentColor"
+                          >
+                            <path d="M19.712.133a5.381 5.381 0 0 0-5.376 5.387 5.381 5.381 0 0 0 5.376 5.386h5.376V5.52A5.381 5.381 0 0 0 19.712.133m0 14.365H5.376A5.381 5.381 0 0 0 0 19.884a5.381 5.381 0 0 0 5.376 5.387h14.336a5.381 5.381 0 0 0 5.376-5.387 5.381 5.381 0 0 0-5.376-5.386" />
+                            <path d="M53.76 19.884a5.381 5.381 0 0 0-5.376-5.386 5.381 5.381 0 0 0-5.376 5.386v5.387h5.376a5.381 5.381 0 0 0 5.376-5.387m-14.336 0V5.52A5.381 5.381 0 0 0 34.048.133a5.381 5.381 0 0 0-5.376 5.387v14.364a5.381 5.381 0 0 0 5.376 5.387 5.381 5.381 0 0 0 5.376-5.387" />
+                            <path d="M34.048 54a5.381 5.381 0 0 0 5.376-5.387 5.381 5.381 0 0 0-5.376-5.386h-5.376v5.386A5.381 5.381 0 0 0 34.048 54m0-14.365h14.336a5.381 5.381 0 0 0 5.376-5.386 5.381 5.381 0 0 0-5.376-5.387H34.048a5.381 5.381 0 0 0-5.376 5.387 5.381 5.381 0 0 0 5.376 5.386" />
+                            <path d="M0 34.249a5.381 5.381 0 0 0 5.376 5.386 5.381 5.381 0 0 0 5.376-5.386v-5.387H5.376A5.381 5.381 0 0 0 0 34.25m14.336 0v14.364a5.381 5.381 0 0 0 5.376 5.387 5.381 5.381 0 0 0 5.376-5.387V34.25a5.381 5.381 0 0 0-5.376-5.387 5.381 5.381 0 0 0-5.376 5.387" />
+                          </svg>
+                          Re-install Bot
+                        </Link>
                       </div>
                     ) : botInstalled === false ? (
                       <div>
@@ -574,6 +720,122 @@ export default function DashboardPage() {
                       </div>
                     ) : null}
                   </div>
+                  
+                  {/* Channel Creation Test Section */}
+                  <hr className="my-6 border-border" />
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-3">
+                      Channel Creation Test
+                    </p>
+                    <p className="text-xs text-muted-foreground mb-4">
+                      Test channel creation using the bot token. Requires the bot to be installed.
+                    </p>
+                    {botInstalled !== true ? (
+                      <div className="rounded-md border border-orange-500/50 bg-orange-500/10 p-3">
+                        <p className="text-xs text-orange-700">
+                          Install the bot first to test channel creation.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="space-y-2">
+                          <label
+                            htmlFor="test-channel-name"
+                            className="text-xs font-medium text-foreground block"
+                          >
+                            Channel Name
+                          </label>
+                          <Input
+                            id="test-channel-name"
+                            type="text"
+                            placeholder="test-channel"
+                            value={testChannelName}
+                            onChange={(e) => setTestChannelName(e.target.value)}
+                            disabled={createChannelMutation.isPending}
+                            className="h-9 text-xs"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Channel names must be lowercase and 1-80 characters.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="test-channel-private"
+                            checked={testChannelIsPrivate}
+                            onChange={(e) => setTestChannelIsPrivate(e.target.checked)}
+                            disabled={createChannelMutation.isPending}
+                            className="h-4 w-4 rounded border-border"
+                          />
+                          <label
+                            htmlFor="test-channel-private"
+                            className="text-xs text-foreground cursor-pointer"
+                          >
+                            Private channel
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!testChannelName.trim()) {
+                              return;
+                            }
+                            await createChannelMutation.mutateAsync({
+                              name: testChannelName.trim(),
+                              isPrivate: testChannelIsPrivate,
+                            });
+                          }}
+                          disabled={
+                            createChannelMutation.isPending ||
+                            !testChannelName.trim()
+                          }
+                          className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-muted/40 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {createChannelMutation.isPending ? (
+                            <>
+                              <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                              Creating...
+                            </>
+                          ) : (
+                            "Create Channel"
+                          )}
+                        </button>
+                        {createChannelMutation.isSuccess &&
+                          createChannelMutation.data?.success &&
+                          createChannelMutation.data.data && (
+                            <div className="rounded-md border border-green-500/50 bg-green-500/10 p-3">
+                              <p className="text-xs font-medium text-green-700 mb-1">
+                                Channel Created Successfully
+                              </p>
+                              <p className="text-xs text-green-600">
+                                Channel ID: {createChannelMutation.data.data.id}
+                              </p>
+                              <p className="text-xs text-green-600">
+                                Channel Name: #{createChannelMutation.data.data.name}
+                              </p>
+                              {createChannelMutation.data.data.userAdded !== undefined && (
+                                <p className="text-xs text-green-600 mt-1">
+                                  {createChannelMutation.data.data.userAdded
+                                    ? "✓ You have been added to the channel"
+                                    : "⚠ Could not add you to the channel automatically"}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        {createChannelMutation.isError ||
+                        (createChannelMutation.data &&
+                          !createChannelMutation.data.success) ? (
+                          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3">
+                            <p className="text-xs text-destructive">
+                              {createChannelMutation.data?.message ||
+                                createChannelMutation.data?.error ||
+                                "Failed to create channel"}
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
@@ -581,18 +843,18 @@ export default function DashboardPage() {
                 </p>
               )}
             </div>
+            )}
 
-            {/* Configuration Card */}
+            {/* Workspace Configuration Card */}
             <div className="rounded-lg border border-border bg-background p-6">
               <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 <span className="h-[1.25em] w-[1.25em]">
                   <LottieIcon animationData={configIconAnimation} />
                 </span>
-                Configuration
+                Workspace Configuration
               </h2>
               <p className="mb-6 text-sm text-muted-foreground">
-                These settings control how your identity appears in Slack and
-                which channel is linked to an email address.
+                These settings control how messages appear in Slack for all users in your workspace.
               </p>
               <hr className="my-6 border-border" />
               <div className="space-y-5 w-full">
@@ -605,7 +867,7 @@ export default function DashboardPage() {
                     <RadioGroup
                       value={identityMode}
                       onValueChange={handleIdentityModeChange}
-                      disabled={isLoading || isInitialLoading}
+                      disabled={updateWorkspaceConfigMutation.isPending || isInitialLoading}
                       className="gap-3"
                     >
                       <div className="flex items-center justify-between gap-3">
@@ -633,7 +895,7 @@ export default function DashboardPage() {
                         />
                       </div>
                     </RadioGroup>
-                    {isLoading ? (
+                    {updateWorkspaceConfigMutation.isPending ? (
                       <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
                         <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
                         Saving...
@@ -645,6 +907,61 @@ export default function DashboardPage() {
                         Changes saved automatically.
                       </p>
                     )}
+                  </div>
+                </div>
+
+                {/* Sending domain configuration */}
+                <div className="grid-cols-2 gap-2 grid items-start">
+                  <div className="col-span-1">
+                    <label
+                      htmlFor="sending-domain"
+                      className="text-sm font-medium text-foreground block mb-1"
+                    >
+                      Sending & reply domain
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Domain used for email replies. Users will appear as{" "}
+                      <span className="font-mono text-xs">Name &lt;name@domain.com&gt;</span>
+                    </p>
+                  </div>
+                  <div className="col-span-1">
+                    {!inboundApiKey ? (
+                      <p className="text-xs text-muted-foreground">
+                        Add your Inbound API key to see available domains
+                      </p>
+                    ) : isLoadingDomains ? (
+                      <p className="text-xs text-muted-foreground flex items-center gap-1">
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        Loading domains...
+                      </p>
+                    ) : domains.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        No verified domains found
+                      </p>
+                    ) : (
+                      <Select
+                        value={sendingDomain || undefined}
+                        onValueChange={handleSendingDomainChange}
+                        disabled={updateWorkspaceConfigMutation.isPending || isInitialLoading}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Select a domain" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {domains.map((domain: { domain: string; status: string; canReceiveEmails: boolean }) => (
+                            <SelectItem key={domain.domain} value={domain.domain}>
+                              {domain.domain}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    {updateWorkspaceConfigMutation.isPending ? (
+                      <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        Saving...
+                      </p>
+                    ) : null}
                   </div>
                 </div>
 
@@ -689,129 +1006,42 @@ export default function DashboardPage() {
                   </div>
                 </div>
               </div>
-              <hr className="my-6 border-border" />
-              <div className="space-y-5 w-full">
-                {/* Domain Configuration */}
-                <div className="grid-cols-2 gap-2 grid items-start">
-                  <span className="text-sm font-medium text-foreground col-span-1">
-                    Domain configuration
-                  </span>
-                  <div className="col-span-1 space-y-4">
-                    {!inboundApiKey ? (
-                      <div className="space-y-2">
-                        <div className="space-y-2">
-                          <label
-                            htmlFor="inbound-api-key"
-                            className="text-sm text-foreground block"
-                          >
-                            Inbound API Key
-                          </label>
-                          <div className="flex gap-2">
-                            <Input
-                              id="inbound-api-key"
-                              type="password"
-                              placeholder="Paste your Inbound API key"
-                              value={inboundApiKeyInput}
-                              onChange={(e) => setInboundApiKeyInput(e.target.value)}
-                              disabled={isSavingApiKey}
-                              className="flex-1 h-9 rounded-md text-xs focus-visible:ring-1 focus-visible:ring-offset-1"
-                            />
-                            <button
-                              type="button"
-                              onClick={handleSaveApiKey}
-                              disabled={isSavingApiKey || !inboundApiKeyInput.trim()}
-                              className="inline-flex items-center rounded-md border border-border bg-background px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              {isSavingApiKey ? (
-                                <>
-                                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent mr-2" />
-                                  Saving...
-                                </>
-                              ) : (
-                                "Save"
-                              )}
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-xs text-muted-foreground">
-                          Enter your Inbound.new API key to configure domain settings.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <div className="space-y-2">
-                          <label
-                            htmlFor="domain-select"
-                            className="text-sm text-foreground block"
-                          >
-                            Select Domain
-                          </label>
-                          <div>
-                            {isLoadingDomains ? (
-                              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                                Loading domains...
-                              </div>
-                            ) : domains.length > 0 ? (
-                              <Select
-                                value={
-                                  domains.find((d) => d.domain === selectedDomain)?.id || ""
-                                }
-                                onValueChange={handleDomainChange}
-                                disabled={isLoading}
-                              >
-                                <SelectTrigger id="domain-select" className="h-9 text-xs w-full">
-                                  <SelectValue placeholder="Select a domain" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {domains.map((domain) => (
-                                    <SelectItem key={domain.id} value={domain.id}>
-                                      {domain.domain}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">
-                                No verified domains found. Please verify your domains in
-                                Inbound.new.
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <p className="text-xs text-muted-foreground">
-                            {selectedDomain
-                              ? `Selected: ${selectedDomain}`
-                              : "Select a domain to use for email addresses"}
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setInboundApiKey("");
-                              setInboundApiKeyInput("");
-                              setDomains([]);
-                              setSelectedDomain("");
-                            }}
-                            className="text-xs text-muted-foreground hover:text-foreground underline"
-                          >
-                            Change API key
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         )}
         <CommandPalette
           open={isCommandPaletteOpen}
-          onOpenChange={setIsCommandPaletteOpen}
+          onOpenChange={(open) => {
+            setIsCommandPaletteOpen(open);
+            if (!open) {
+              // Reset when closing
+              setCreateRouteInitialStep(undefined);
+            }
+          }}
           domains={domains}
           onChannelCreate={handleChannelCreate}
+          initialStep={createRouteInitialStep}
         />
+        <AlertDialog open={emailToDelete !== null} onOpenChange={(open) => !open && setEmailToDelete(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Remove email route</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to remove the route for <strong>{emailToDelete}</strong>? The email address will be deleted from Inbound.new, but the Slack channel will remain.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleteRouteMutation.isPending}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleConfirmDelete}
+                disabled={deleteRouteMutation.isPending}
+                className="bg-red-600 text-white hover:bg-red-700 focus:ring-red-600"
+              >
+                {deleteRouteMutation.isPending ? "Removing..." : "Remove"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </main>
     </div>
   );

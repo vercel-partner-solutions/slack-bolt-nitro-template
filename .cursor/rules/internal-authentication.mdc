@@ -1,0 +1,296 @@
+---
+globs: **/*.ts,**/*.tsx
+description: Internal authentication patterns for securing cross-service communication between dashboard and api-server
+---
+
+# Internal Authentication
+
+## Overview
+
+All communication between the **dashboard** (Next.js app) and **api-server** (Nitro server) must be secured using `INTERNAL_API_KEY`. This prevents unauthorized access to internal endpoints.
+
+## Authentication Flow
+
+```
+Dashboard (Next.js) → apiClient → Authorization: Bearer ${INTERNAL_API_KEY} → API Server → validateInternalRequest() → Endpoint Handler
+```
+
+## API Server: Securing Endpoints
+
+### Required Pattern
+
+All internal endpoints (called by dashboard) MUST use `validateInternalRequest()`:
+
+```typescript
+import { eventHandler } from 'h3';
+import { validateInternalRequest } from '../../../bolt/middleware/validate-internal-request';
+
+export default eventHandler(async (event) => {
+  // Validate internal API key - MUST be first line in handler
+  await validateInternalRequest(event);
+  
+  // Rest of endpoint logic...
+});
+```
+
+### Import Path
+
+The middleware is located at:
+```typescript
+import { validateInternalRequest } from '../../../bolt/middleware/validate-internal-request';
+```
+
+Adjust the relative path based on your endpoint location:
+- `src/server/api/workspace/[teamId]/status.get.ts` → `../../../../bolt/middleware/validate-internal-request`
+- `src/server/api/user-config/[userId].get.ts` → `../../../bolt/middleware/validate-internal-request`
+
+### Which Endpoints Should Use It?
+
+**✅ MUST use `validateInternalRequest`:**
+- `/api/workspace/[teamId]/*` - All workspace endpoints
+- `/api/user-config/[userId]/*` - User configuration endpoints
+- Any endpoint called by the dashboard via `apiClient`
+
+**❌ MUST NOT use `validateInternalRequest`:**
+- `/api/slack/events.post.ts` - Slack webhook endpoint (uses Slack signature verification)
+- `/api/inbound.post.ts` - Inbound.new webhook endpoint (uses webhook authentication)
+- `/api/attachment/[...path].ts` - Public file serving endpoint
+- `/api/auth/[...path].ts` - Auth placeholder (handled by Next.js)
+- `/api/dev/*` - Development endpoints (not for production)
+
+### Error Handling
+
+The middleware will throw errors:
+- **401 Unauthorized**: Invalid or missing API key
+- **500 Internal Server Error**: INTERNAL_API_KEY not configured
+
+No additional error handling needed - the middleware throws these automatically.
+
+## Dashboard: Calling Secured Endpoints
+
+### Required Pattern
+
+Always use `apiClient` from `@/lib/api-client` - it automatically includes the INTERNAL_API_KEY:
+
+```typescript
+import { apiClient } from "@/lib/api-client";
+
+// In a server action
+export async function fetchData() {
+  const result = await apiClient<ResponseType>(`/api/workspace/${teamId}/status`);
+  return result;
+}
+
+// With POST/PUT/PATCH
+export async function createResource(data: CreateData) {
+  const result = await apiClient<ResponseType>(`/api/workspace/${teamId}/channels`, {
+    method: 'POST',
+    body: data,
+  });
+  return result;
+}
+```
+
+### Never Use Direct Fetch
+
+**❌ DON'T:**
+```typescript
+// Don't use fetch directly - missing authentication
+const response = await fetch(`${process.env.BACKEND_API_URL}/api/workspace/${teamId}/status`);
+```
+
+**✅ DO:**
+```typescript
+// Always use apiClient
+const result = await apiClient(`/api/workspace/${teamId}/status`);
+```
+
+### apiClient Features
+
+The `apiClient` (from `@/lib/api-client`) automatically:
+- Adds `Authorization: Bearer ${INTERNAL_API_KEY}` header
+- Sets correct `baseURL` from `BACKEND_API_URL`
+- Handles retries (2 retries on 5xx errors)
+- Sets 10 second timeout
+- Logs request/response errors
+
+## Environment Variables
+
+### Required in Both Apps
+
+**Dashboard (Next.js):**
+```env
+INTERNAL_API_KEY=your-secret-key-here
+BACKEND_API_URL=http://localhost:3668  # or production URL
+```
+
+**API Server (Nitro):**
+```env
+INTERNAL_API_KEY=your-secret-key-here  # MUST match dashboard
+```
+
+**⚠️ Critical:** Both apps MUST use the same `INTERNAL_API_KEY` value.
+
+## Best Practices
+
+### 1. Always Validate First
+
+Validation should be the **first line** in the event handler, before any business logic:
+
+```typescript
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event); // First line
+  
+  // Then business logic
+  const teamId = getRouterParam(event, 'teamId');
+  // ...
+});
+```
+
+### 2. Consistent Error Responses
+
+The middleware handles authentication errors automatically. Your endpoints should handle business logic errors:
+
+```typescript
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);
+  
+  try {
+    // Business logic
+    const result = await doSomething();
+    return { success: true, data: result };
+  } catch (error) {
+    throw createError({
+      statusCode: 500,
+      message: error instanceof Error ? error.message : 'Operation failed',
+    });
+  }
+});
+```
+
+### 3. Document Security in Comments
+
+Include a comment in endpoint files noting security:
+
+```typescript
+/**
+ * Get Slack channels for a workspace using the bot token
+ * Secured with internal API key validation
+ */
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);
+  // ...
+});
+```
+
+### 4. Type Safety
+
+Use TypeScript types for request/response:
+
+```typescript
+interface ResponseType {
+  success: boolean;
+  data?: Channel[];
+  error?: string;
+}
+
+const result = await apiClient<ResponseType>(`/api/workspace/${teamId}/channels`);
+```
+
+## Common Patterns
+
+### Pattern 1: Simple GET Request
+
+```typescript
+// api-server: src/server/api/workspace/[teamId]/status.get.ts
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);
+  const teamId = getRouterParam(event, 'teamId');
+  // ... fetch data
+  return { success: true, data: result };
+});
+```
+
+```typescript
+// dashboard: app/actions/user-config.ts
+export async function checkStatus() {
+  const result = await apiClient(`/api/workspace/${teamId}/status`);
+  return result;
+}
+```
+
+### Pattern 2: POST Request with Body
+
+```typescript
+// api-server: src/server/api/workspace/[teamId]/channels.post.ts
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);
+  const teamId = getRouterParam(event, 'teamId');
+  const body = await readBody(event);
+  // ... create resource
+  return { success: true, data: result };
+});
+```
+
+```typescript
+// dashboard: app/actions/user-config.ts
+export async function createChannel(name: string) {
+  const result = await apiClient(`/api/workspace/${teamId}/channels`, {
+    method: 'POST',
+    body: { name, isPrivate: false },
+  });
+  return result;
+}
+```
+
+### Pattern 3: Error Handling
+
+```typescript
+// dashboard: Handle errors from secured endpoints
+const result = await apiClient(`/api/workspace/${teamId}/channels`);
+
+if (!result.success) {
+  if (result.error === 'bot_not_installed') {
+    // Handle specific error
+  }
+  return { success: false, error: result.error };
+}
+
+return result;
+```
+
+## Security Checklist
+
+When creating a new endpoint:
+
+- [ ] Endpoint is called from dashboard? → Add `validateInternalRequest(event)`
+- [ ] Endpoint is a webhook? → Use webhook-specific authentication
+- [ ] Endpoint is public? → Document why it doesn't need auth
+- [ ] Updated env.template with INTERNAL_API_KEY description?
+- [ ] Both apps have matching INTERNAL_API_KEY values?
+
+## Troubleshooting
+
+### Error: "Unauthorized - Invalid internal API key"
+
+**Possible causes:**
+1. `INTERNAL_API_KEY` mismatch between dashboard and api-server
+2. Missing `Authorization` header in request
+3. Wrong header format (should be `Bearer ${INTERNAL_API_KEY}`)
+
+**Solution:**
+- Verify both `.env` files have the same `INTERNAL_API_KEY` value
+- Ensure using `apiClient` (not direct `fetch`)
+- Check environment variables are loaded correctly
+
+### Error: "INTERNAL_API_KEY not configured"
+
+**Solution:**
+- Add `INTERNAL_API_KEY` to `.env` file in api-server
+- Restart the server
+
+## References
+
+- Middleware: [validate-internal-request.ts](mdc:apps/api-server/src/bolt/middleware/validate-internal-request.ts)
+- API Client: [api-client.ts](mdc:apps/dashboard/lib/api-client.ts)
+- Example Endpoint: [channels.post.ts](mdc:apps/api-server/src/server/api/workspace/[teamId]/channels.post.ts)

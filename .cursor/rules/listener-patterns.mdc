@@ -1,5 +1,6 @@
 ---
-globs: src/bolt/listeners/**/*.ts
+globs: apps/api-server/src/bolt/listeners/**/*.ts
+alwaysApply: false
 ---
 
 # Listener Implementation Patterns

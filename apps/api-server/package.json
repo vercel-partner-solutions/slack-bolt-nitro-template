@@ -30,6 +30,7 @@
     "@neondatabase/serverless": "^1.0.2",
     "@slackbound/db": "workspace:*",
     "@slack/bolt": "^4.5.0",
+    "@slack/web-api": "^7.11.0",
     "@upstash/redis": "^1.35.6",
     "@vercel/slack-bolt": "^0.1.5",
     "drizzle-orm": "^0.44.7",

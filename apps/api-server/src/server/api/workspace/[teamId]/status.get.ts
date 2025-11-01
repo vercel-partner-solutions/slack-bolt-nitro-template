@@ -59,10 +59,16 @@ export default eventHandler(async (event) => {
       },
     };
   } catch (error) {
-    console.error('Error checking installation status:', error);
+    console.error(`[status.get] Error checking installation status for team ${teamId}:`, error);
+    
+    // Log full error details for debugging
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    console.error('[status.get] Full error details:', { errorMessage, errorStack });
+    
     throw createError({
       statusCode: 500,
-      message: error instanceof Error ? error.message : 'Failed to check installation status',
+      message: errorMessage || 'Failed to check installation status',
     });
   }
 });

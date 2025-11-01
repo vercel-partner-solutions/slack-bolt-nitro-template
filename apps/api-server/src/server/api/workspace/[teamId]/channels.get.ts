@@ -24,13 +24,24 @@ export default eventHandler(async (event) => {
     // Check if bot is installed in this workspace
     let installation;
     try {
-      installation = await installationStore.fetchInstallation({ teamId });
+      installation = await installationStore.fetchInstallation({ teamId, isEnterpriseInstall: false, enterpriseId: undefined });
     } catch (error) {
       // Bot not installed
+      console.error(`[channels.get] Installation not found for team ${teamId}:`, error);
       return {
         success: false,
         error: 'bot_not_installed',
         message: 'SlackBound bot is not installed in this workspace. Please install it first.',
+      };
+    }
+    
+    // Validate bot token exists
+    if (!installation.bot || !installation.bot.token) {
+      console.error(`[channels.get] Bot token missing for team ${teamId}`);
+      return {
+        success: false,
+        error: 'bot_not_installed',
+        message: 'SlackBound bot token not found. Please reinstall the bot.',
       };
     }
     
@@ -64,10 +75,21 @@ export default eventHandler(async (event) => {
       data: channels,
     };
   } catch (error) {
-    console.error('Error fetching workspace channels:', error);
+    console.error(`[channels.get] Error fetching channels for team ${teamId}:`, error);
+    
+    // If it's a known error, return it as a proper response
+    if (error && typeof error === 'object' && 'statusCode' in error) {
+      throw error;
+    }
+    
+    // Log full error details for debugging
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    console.error('[channels.get] Full error details:', { errorMessage, errorStack });
+    
     throw createError({
       statusCode: 500,
-      message: error instanceof Error ? error.message : 'Failed to fetch channels',
+      message: errorMessage || 'Failed to fetch channels',
     });
   }
 });

@@ -2,8 +2,12 @@ import { eventHandler, getRouterParam } from "h3";
 import { eq } from "drizzle-orm";
 import { db } from "../../db";
 import { userConfig } from "@slackbound/db";
+import { validateInternalRequest } from "../../../bolt/middleware/validate-internal-request";
 
 export default eventHandler(async (event) => {
+	// Validate internal API key
+	await validateInternalRequest(event);
+	
 	try {
 		const userId = getRouterParam(event, "userId");
 

@@ -1,7 +1,7 @@
 ---
-globs: src/server/**/*.ts
+globs: apps/api-server/src/server/api/**/*.ts
+alwaysApply: false
 ---
-
 # Nitro API Routes
 
 ## Route File Convention

@@ -109,7 +109,17 @@ export const installationStore: InstallationStore = {
     }
     
     // Decrypt token
-    const decryptedToken = decrypt(result.botAccessToken);
+    let decryptedToken: string;
+    try {
+      decryptedToken = decrypt(result.botAccessToken);
+    } catch (decryptError) {
+      console.error(`[InstallationStore] Failed to decrypt bot token for team ${result.teamId}:`, decryptError);
+      throw new Error(
+        `Failed to decrypt bot token for team ${result.teamId}. ` +
+        `This usually means ENCRYPTION_KEY is missing or has changed. ` +
+        `Original error: ${decryptError instanceof Error ? decryptError.message : String(decryptError)}`
+      );
+    }
     
     // Return installation in Bolt's expected format
     return {

@@ -33,7 +33,7 @@ export default eventHandler(async (event) => {
   // Create a Web Request with the raw body
   const request = new Request(url, {
     method: event.node.req.method,
-    headers: event.node.req.headers as HeadersInit,
+    headers: event.node.req.headers as unknown as Headers,
     body: rawBody,
   });
   

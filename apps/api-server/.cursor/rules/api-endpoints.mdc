@@ -1,0 +1,421 @@
+---
+globs: *.ts,*.tsx
+description: "API endpoint patterns, database imports, and coding standards for api-server"
+---
+
+# API Server Endpoint Patterns
+
+## Database Import Patterns
+
+### Correct Import Path
+
+Always use the **relative path** from your endpoint file to `src/server/db/index.ts`:
+
+**❌ WRONG:**
+```typescript
+import { getDb } from "../../../../db";  // Wrong - too many levels up
+import { db } from "~/server/db";        // Wrong - ~ alias doesn't work in api-server
+```
+
+**✅ CORRECT:**
+```typescript
+// From: src/server/api/workspace/[teamId]/config.get.ts
+import { db } from "../../../db";
+
+// From: src/server/api/user-config/[userId].get.ts  
+import { db, schema } from "../../db";
+
+// From: src/server/api/inbound.post.ts
+import { db } from "../db";
+```
+
+### Path Resolution Guide
+
+Count directory levels from your endpoint file to `src/server/db/`:
+
+| Endpoint Location | Relative Path | Example |
+|------------------|--------------|---------|
+| `src/server/api/[file].ts` | `../db` | `inbound.post.ts` |
+| `src/server/api/[folder]/[file].ts` | `../../db` | `user-config/[userId].get.ts` |
+| `src/server/api/[folder]/[folder]/[file].ts` | `../../../db` | `workspace/[teamId]/config.get.ts` |
+| `src/server/api/[folder]/[folder]/[folder]/[file].ts` | `../../../../db` | (not currently used) |
+
+### Database Exports
+
+The `src/server/db/index.ts` exports:
+- `db` - The Drizzle database client instance (use this directly, no function call needed)
+- `schema` - The schema object (use when querying with `db.query`)
+
+**✅ CORRECT:**
+```typescript
+import { db } from "../../../db";
+import { db, schema } from "../../../db";  // When using db.query
+import { workspaceConfig } from "@slackbound/db";  // Import schema types from shared package
+```
+
+**❌ WRONG:**
+```typescript
+import { getDb } from "../../../db";  // getDb doesn't exist
+const db = getDb();  // Don't call a function - db is already the instance
+```
+
+## API Endpoint Structure
+
+### Basic Endpoint Pattern
+
+All endpoints follow this structure:
+
+```typescript
+import { eventHandler, getRouterParam, readBody, createError } from 'h3';
+import { validateInternalRequest } from '../../../../bolt/middleware/validate-internal-request';
+import { db } from '../../../db';
+import { someTable } from "@slackbound/db";
+import { eq } from 'drizzle-orm';
+
+/**
+ * Brief description of what this endpoint does
+ * Optional: additional context or usage notes
+ */
+export default eventHandler(async (event) => {
+  // 1. Security: Validate internal API key (MUST be first for secured endpoints)
+  await validateInternalRequest(event);
+  
+  // 2. Extract route parameters
+  const param = getRouterParam(event, 'paramName');
+  
+  // 3. Validate required parameters
+  if (!param) {
+    throw createError({
+      statusCode: 400,
+      message: 'paramName is required',
+    });
+  }
+  
+  // 4. Business logic
+  try {
+    // Database operations, external API calls, etc.
+    const result = await db.select().from(someTable);
+    
+    // 5. Return success response
+    return {
+      success: true,
+      data: result,
+    };
+  } catch (error) {
+    // 6. Error handling with logging
+    console.error('[endpoint-name] Error description:', error);
+    throw createError({
+      statusCode: 500,
+      message: error instanceof Error ? error.message : 'Operation failed',
+    });
+  }
+});
+```
+
+## Security Patterns
+
+### Internal Endpoints (Dashboard → API Server)
+
+**✅ MUST use `validateInternalRequest()`:**
+- `/api/workspace/[teamId]/*` - All workspace endpoints
+- `/api/user-config/[userId]/*` - User configuration endpoints
+- Any endpoint called by the dashboard
+
+```typescript
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);  // MUST be first line
+  // ... rest of handler
+});
+```
+
+**❌ MUST NOT use `validateInternalRequest()`:**
+- `/api/slack/events.post.ts` - Slack webhook (uses Slack signature verification)
+- `/api/inbound.post.ts` - Inbound.new webhook (uses webhook authentication)
+- `/api/attachment/*` - Public file serving
+- `/api/auth/*` - Auth placeholder (handled by Next.js)
+
+### Webhook Endpoints
+
+Webhook endpoints use their own authentication:
+
+```typescript
+// Slack events - uses Slack signature verification (handled by Bolt framework)
+export default eventHandler(async (event) => {
+  // No validateInternalRequest - handled by Bolt middleware
+  // ...
+});
+
+// Inbound.new - uses Authorization header
+export default eventHandler(async (event) => {
+  const authHeader = getHeader(event, 'authorization');
+  if (authHeader !== `Bearer ${process.env.INBOUND_API_KEY}`) {
+    throw createError({ statusCode: 401, message: 'Unauthorized' });
+  }
+  // ...
+});
+```
+
+## Error Handling Patterns
+
+### Validation Errors
+
+Return proper HTTP status codes and clear error messages:
+
+```typescript
+if (!teamId) {
+  throw createError({
+    statusCode: 400,
+    message: 'teamId is required',
+  });
+}
+```
+
+### Database Errors
+
+Catch and log errors with context:
+
+```typescript
+try {
+  const result = await db.select().from(workspaceConfig);
+  return { success: true, data: result };
+} catch (error) {
+  console.error(`[endpoint-name] Error for team ${teamId}:`, error);
+  
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorStack = error instanceof Error ? error.stack : undefined;
+  console.error('[endpoint-name] Full error details:', { errorMessage, errorStack });
+  
+  throw createError({
+    statusCode: 500,
+    message: errorMessage || 'Operation failed',
+  });
+}
+```
+
+### Graceful Degradation
+
+For optional operations, return partial success:
+
+```typescript
+let optionalResult = null;
+try {
+  optionalResult = await someOptionalOperation();
+} catch (error) {
+  console.warn('[endpoint-name] Optional operation failed:', error);
+  // Continue without optional result
+}
+
+return {
+  success: true,
+  data: mainResult,
+  optional: optionalResult,  // null if failed
+};
+```
+
+## Response Patterns
+
+### Success Response
+
+Always return a consistent success format:
+
+```typescript
+return {
+  success: true,
+  data: result,  // The actual data
+};
+```
+
+### Error Response
+
+For errors, either throw `createError()` or return an error response:
+
+```typescript
+// Option 1: Throw (for HTTP errors)
+throw createError({
+  statusCode: 400,
+  message: 'Invalid input',
+});
+
+// Option 2: Return error object (for business logic errors)
+return {
+  success: false,
+  error: 'bot_not_installed',
+  message: 'Bot is not installed in this workspace',
+};
+```
+
+## Common Patterns
+
+### Pattern 1: GET with Route Parameter
+
+```typescript
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);
+  
+  const teamId = getRouterParam(event, 'teamId');
+  if (!teamId) {
+    throw createError({ statusCode: 400, message: 'teamId is required' });
+  }
+  
+  const config = await db
+    .select()
+    .from(workspaceConfig)
+    .where(eq(workspaceConfig.teamId, teamId))
+    .limit(1);
+  
+  return { success: true, data: config[0] || null };
+});
+```
+
+### Pattern 2: POST/PUT with Body
+
+```typescript
+export default eventHandler(async (event) => {
+  await validateInternalRequest(event);
+  
+  const teamId = getRouterParam(event, 'teamId');
+  const body = await readBody<RequestBodyType>(event);
+  
+  if (!body.field) {
+    throw createError({ statusCode: 400, message: 'field is required' });
+  }
+  
+  const result = await db
+    .update(workspaceConfig)
+    .set({ field: body.field, updatedAt: new Date() })
+    .where(eq(workspaceConfig.teamId, teamId))
+    .returning();
+  
+  return { success: true, data: result[0] };
+});
+```
+
+### Pattern 3: Using Installation Store
+
+```typescript
+import { installationStore } from '../../../../bolt/utils/installation-store';
+import { WebClient } from '@slack/web-api';
+
+let installation;
+try {
+  installation = await installationStore.fetchInstallation({ 
+    teamId, 
+    isEnterpriseInstall: false, 
+    enterpriseId: undefined 
+  });
+} catch (error) {
+  return {
+    success: false,
+    error: 'bot_not_installed',
+    message: 'Bot is not installed in this workspace',
+  };
+}
+
+// Validate bot token exists
+if (!installation.bot || !installation.bot.token) {
+  return {
+    success: false,
+    error: 'bot_not_installed',
+    message: 'Bot token not found',
+  };
+}
+
+const client = new WebClient(installation.bot.token);
+// Use client for Slack API calls
+```
+
+### Pattern 4: Using db.query (Relational Queries)
+
+```typescript
+import { db, schema } from '../../../db';
+
+const installation = await db.query.workspaceInstallations.findFirst({
+  where: and(
+    eq(schema.workspaceInstallations.teamId, teamId),
+    eq(schema.workspaceInstallations.isActive, true)
+  ),
+  columns: {
+    teamId: true,
+    teamName: true,
+    // ... only select needed columns
+  },
+});
+```
+
+## TypeScript Patterns
+
+### Request Body Types
+
+Define interfaces for request bodies:
+
+```typescript
+interface UpdateConfigBody {
+  shouldShowFullEmail?: boolean;
+  otherField?: string;
+}
+
+const body = await readBody<UpdateConfigBody>(event);
+```
+
+### Response Types
+
+Use consistent response types:
+
+```typescript
+type SuccessResponse<T> = {
+  success: true;
+  data: T;
+};
+
+type ErrorResponse = {
+  success: false;
+  error: string;
+  message?: string;
+};
+
+type ApiResponse<T> = SuccessResponse<T> | ErrorResponse;
+```
+
+## File Naming Conventions
+
+- GET endpoints: `[resource].get.ts`
+- POST endpoints: `[resource].post.ts`
+- PUT endpoints: `[resource].put.ts`
+- DELETE endpoints: `[resource].delete.ts`
+- Dynamic routes: `[param]/[resource].get.ts` or `[...param].ts`
+
+## Checklist for New Endpoints
+
+When creating a new endpoint, ensure:
+
+- [ ] Correct database import path (count directory levels)
+- [ ] `validateInternalRequest()` added if needed (first line)
+- [ ] Route parameters extracted and validated
+- [ ] Request body typed and validated
+- [ ] Try-catch block for error handling
+- [ ] Error logging with context (endpoint name, parameters)
+- [ ] Consistent response format (`{ success, data }` or `{ success, error }`)
+- [ ] HTTP status codes appropriate (400 for validation, 500 for server errors)
+- [ ] JSDoc comment describing the endpoint
+- [ ] File follows naming convention (`[name].[method].ts`)
+
+## Anti-Patterns to Avoid
+
+1. ❌ **Don't use `getDb()`** - Import `db` directly
+2. ❌ **Don't use `~/` aliases** - Use relative paths
+3. ❌ **Don't skip error handling** - Always wrap in try-catch
+4. ❌ **Don't forget `validateInternalRequest()`** - For all dashboard-called endpoints
+5. ❌ **Don't use inconsistent response formats** - Always use `{ success, data/error }`
+6. ❌ **Don't import schemas directly** - Use `@slackbound/db` package
+7. ❌ **Don't use `any` types** - Define proper interfaces
+8. ❌ **Don't log sensitive data** - Avoid logging tokens, passwords, etc.
+
+## Examples
+
+See these files for reference implementations:
+
+- `src/server/api/workspace/[teamId]/config.get.ts` - GET with route param
+- `src/server/api/workspace/[teamId]/config.put.ts` - PUT with body
+- `src/server/api/workspace/[teamId]/channels.get.ts` - GET with installation store
+- `src/server/api/user-config/[userId].get.ts` - Simple GET endpoint
+- `src/server/api/inbound.post.ts` - Webhook endpoint (no internal auth)

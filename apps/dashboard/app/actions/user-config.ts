@@ -5,35 +5,473 @@ import "@/lib/env";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
 import { getDb } from "@/db";
-import { userConfig, account } from "@slackbound/db";
+import { userConfig, account, workspaceConfig, emailRoutes } from "@slackbound/db";
 import { getAuth } from "@/lib/auth";
 import { WebClient } from "@slack/web-api";
 
 /**
- * Create Slack channel (placeholder)
+ * Check if a SlackBound endpoint exists for the workspace
  */
-export async function createSlackChannel(channelName: string) {
-  // TODO: Implement Slack channel creation
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  return { success: true, channelId: "C123456" };
+async function doesSlackboundEndpointExist(teamId: string): Promise<{ exists: boolean; endpointId?: string }> {
+  try {
+    const db = getDb();
+    
+    const config = await db
+      .select()
+      .from(workspaceConfig)
+      .where(eq(workspaceConfig.teamId, teamId))
+      .limit(1);
+    
+    if (config.length === 0 || !config[0].inboundEndpointId) {
+      return { exists: false };
+    }
+    
+    return { exists: true, endpointId: config[0].inboundEndpointId };
+  } catch (error) {
+    console.error("Error checking SlackBound endpoint:", error);
+    return { exists: false };
+  }
 }
 
 /**
- * Create email address (placeholder)
+ * Create or get SlackBound webhook endpoint for the workspace
+ */
+async function getOrCreateSlackboundEndpoint(
+  teamId: string,
+  inboundApiKey: string
+): Promise<{ success: boolean; endpointId?: string; error?: string }> {
+  try {
+    // Check if endpoint already exists
+    const existing = await doesSlackboundEndpointExist(teamId);
+    if (existing.exists && existing.endpointId) {
+      return { success: true, endpointId: existing.endpointId };
+    }
+    
+    // Get public app URL (where inbound webhook will be sent)
+    // Next.js rewrites /api/* to the backend, so use the Next.js app URL
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+    const webhookUrl = `${appUrl}/api/inbound`;
+    
+    // Create endpoint via Inbound API
+    const response = await fetch("https://inbound.new/api/v2/endpoints", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${inboundApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: `SlackBound Webhook - ${teamId}`,
+        type: "webhook",
+        description: `SlackBound webhook endpoint for workspace ${teamId}`,
+        config: {
+          url: webhookUrl,
+          timeout: 30,
+          retryAttempts: 3,
+        },
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: errorData.error || `Failed to create endpoint: ${response.statusText}`,
+      };
+    }
+    
+    const data = await response.json();
+    const endpointId = data.id;
+    
+    // Save endpoint ID to database
+    const db = getDb();
+    
+    const existingConfig = await db
+      .select()
+      .from(workspaceConfig)
+      .where(eq(workspaceConfig.teamId, teamId))
+      .limit(1);
+    
+    if (existingConfig.length === 0) {
+      await db.insert(workspaceConfig).values({
+        teamId,
+        inboundEndpointId: endpointId,
+        emailIntegrationEnabled: true,
+        updatedAt: new Date(),
+      });
+    } else {
+      await db
+        .update(workspaceConfig)
+        .set({
+          inboundEndpointId: endpointId,
+          updatedAt: new Date(),
+        })
+        .where(eq(workspaceConfig.teamId, teamId));
+    }
+    
+    return { success: true, endpointId };
+  } catch (error) {
+    console.error("Error creating/getting SlackBound endpoint:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to create endpoint",
+    };
+  }
+}
+
+/**
+ * Create email address via Inbound.new API
  */
 export async function createEmailAddress(emailAddress: string) {
-  // TODO: Implement email address creation via Inbound API
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  return { success: true, emailId: "email123" };
+  try {
+    // Get user's workspace team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    
+    // Get inbound API key from user config
+    const slackUserId = await getSlackUserId();
+    if (!slackUserId) {
+      return {
+        success: false,
+        error: "Slack user ID not found",
+      };
+    }
+    
+    const db = getDb();
+    const userConfigResult = await db
+      .select()
+      .from(userConfig)
+      .where(eq(userConfig.userId, slackUserId))
+      .limit(1);
+    
+    const inboundApiKey = userConfigResult[0]?.inboundApiKey;
+    if (!inboundApiKey) {
+      return {
+        success: false,
+        error: "Inbound API key not found. Please configure your API key first.",
+      };
+    }
+    
+    // Get or create SlackBound endpoint
+    const endpointResult = await getOrCreateSlackboundEndpoint(teamId, inboundApiKey);
+    if (!endpointResult.success || !endpointResult.endpointId) {
+      return {
+        success: false,
+        error: endpointResult.error || "Failed to get or create SlackBound endpoint",
+      };
+    }
+    
+    // Parse email address to get domain
+    const emailParts = emailAddress.split("@");
+    if (emailParts.length !== 2) {
+      return {
+        success: false,
+        error: "Invalid email address format",
+      };
+    }
+    
+    const domain = emailParts[1];
+    
+    // Get domain ID from Inbound API
+    const domainsResponse = await fetch("https://inbound.new/api/v2/domains", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${inboundApiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!domainsResponse.ok) {
+      return {
+        success: false,
+        error: "Failed to fetch domains from Inbound.new",
+      };
+    }
+    
+    const domainsData = await domainsResponse.json();
+    const domainInfo = domainsData.data?.find((d: { domain: string }) => d.domain === domain);
+    
+    if (!domainInfo || !domainInfo.id) {
+      return {
+        success: false,
+        error: `Domain ${domain} not found in your Inbound.new account`,
+      };
+    }
+    
+    // Create email address
+    const emailResponse = await fetch("https://inbound.new/api/v2/email-addresses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${inboundApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        address: emailAddress,
+        domainId: domainInfo.id,
+        endpointId: endpointResult.endpointId,
+        isActive: true,
+      }),
+    });
+    
+    if (!emailResponse.ok) {
+      const errorData = await emailResponse.json().catch(() => ({}));
+      return {
+        success: false,
+        error: errorData.error || `Failed to create email address: ${emailResponse.statusText}`,
+      };
+    }
+    
+    const emailData = await emailResponse.json();
+    
+    return {
+      success: true,
+      emailId: emailData.id,
+      data: emailData,
+    };
+  } catch (error) {
+    console.error("Error creating email address:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to create email address",
+    };
+  }
 }
 
 /**
- * Link channel and email (placeholder)
+ * Link channel and email - saves mapping to database
  */
-export async function linkChannelAndEmail(channelId: string, emailId: string) {
-  // TODO: Implement linking channel and email
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  return { success: true };
+export async function linkChannelAndEmail(
+  channelId: string,
+  emailId: string,
+  emailAddress: string,
+  channelName?: string
+) {
+  try {
+    // Get user's workspace team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    
+    // Get channel name if not provided (fetch from Slack)
+    let finalChannelName = channelName;
+    if (!finalChannelName) {
+      try {
+        const accessToken = await getSlackAccessToken();
+        if (accessToken) {
+          const client = new WebClient(accessToken);
+          const result = await client.conversations.info({ channel: channelId });
+          if (result.ok && result.channel) {
+            finalChannelName = result.channel.name;
+          }
+        }
+      } catch (error) {
+        console.warn("Could not fetch channel name:", error);
+      }
+    }
+    
+    // Save to emailRoutes table
+    const db = getDb();
+    
+    // Normalize email address to lowercase for consistent storage
+    const normalizedEmailAddress = emailAddress.toLowerCase();
+    
+    // Check if route already exists
+    const existingRoute = await db
+      .select()
+      .from(emailRoutes)
+      .where(eq(emailRoutes.emailAddress, normalizedEmailAddress))
+      .limit(1);
+    
+    if (existingRoute.length > 0) {
+      // Update existing route
+      await db
+        .update(emailRoutes)
+        .set({
+          channelId,
+          channelName: finalChannelName,
+          teamId,
+          isActive: true,
+          updatedAt: new Date(),
+        })
+        .where(eq(emailRoutes.emailAddress, normalizedEmailAddress));
+    } else {
+      // Create new route
+      await db.insert(emailRoutes).values({
+        emailAddress: normalizedEmailAddress,
+        channelId,
+        channelName: finalChannelName,
+        teamId,
+        isActive: true,
+        updatedAt: new Date(),
+      });
+    }
+    
+    return {
+      success: true,
+    };
+  } catch (error) {
+    console.error("Error linking channel and email:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to link channel and email",
+    };
+  }
+}
+
+/**
+ * Fetch email routes for the current workspace
+ */
+export async function fetchEmailRoutes() {
+  try {
+    // Get user's workspace team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    
+    // Fetch routes from database
+    const db = getDb();
+    const routes = await db
+      .select()
+      .from(emailRoutes)
+      .where(eq(emailRoutes.teamId, teamId));
+    
+    return {
+      success: true,
+      data: routes,
+    };
+  } catch (error) {
+    console.error("Error fetching email routes:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to fetch email routes",
+      data: [],
+    };
+  }
+}
+
+/**
+ * Delete email route - deletes email address from Inbound.new but NOT the Slack channel
+ */
+export async function deleteEmailRoute(emailAddress: string) {
+  try {
+    // Get user's workspace team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    // Get inbound API key from user config
+    const slackUserId = await getSlackUserId();
+    if (!slackUserId) {
+      return {
+        success: false,
+        error: "Slack user ID not found",
+      };
+    }
+    
+    const db = getDb();
+    const userConfigResult = await db
+      .select()
+      .from(userConfig)
+      .where(eq(userConfig.userId, slackUserId))
+      .limit(1);
+    
+    const inboundApiKey = userConfigResult[0]?.inboundApiKey;
+    if (!inboundApiKey) {
+      return {
+        success: false,
+        error: "Inbound API key not found. Please configure your API key first.",
+      };
+    }
+    
+    // Get email address ID from Inbound API
+    const emailResponse = await fetch(`https://inbound.new/api/v2/email-addresses?address=${encodeURIComponent(emailAddress)}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${inboundApiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!emailResponse.ok) {
+      const errorData = await emailResponse.json().catch(() => ({}));
+      return {
+        success: false,
+        error: errorData.error || "Failed to find email address in Inbound.new",
+      };
+    }
+    
+    const emailData = await emailResponse.json();
+    const emailAddresses = emailData.data || [];
+    
+    if (emailAddresses.length === 0) {
+      return {
+        success: false,
+        error: "Email address not found in Inbound.new",
+      };
+    }
+    
+    const emailAddr = emailAddresses[0];
+    
+    // Delete email address from Inbound.new
+    const deleteResponse = await fetch(`https://inbound.new/api/v2/email-addresses/${emailAddr.id}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${inboundApiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!deleteResponse.ok) {
+      const errorData = await deleteResponse.json().catch(() => ({}));
+      return {
+        success: false,
+        error: errorData.error || "Failed to delete email address from Inbound.new",
+      };
+    }
+    
+    // Remove route from database (but NOT the Slack channel)
+    // Normalize email to lowercase to match how it's stored
+    const normalizedEmailAddress = emailAddress.toLowerCase();
+    await db
+      .delete(emailRoutes)
+      .where(eq(emailRoutes.emailAddress, normalizedEmailAddress));
+    
+    return {
+      success: true,
+    };
+  } catch (error) {
+    console.error("Error deleting email route:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to delete email route",
+    };
+  }
 }
 async function getSlackUserId(): Promise<string | null> {
   try {
@@ -259,6 +697,91 @@ export async function checkBotInstallation() {
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to check installation",
+    };
+  }
+}
+
+/**
+ * Create a Slack channel using the bot token (if installed)
+ */
+export async function createSlackChannel(channelName: string, isPrivate: boolean = false) {
+  try {
+    // Get user's workspace team_id and user_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    const userId = workspaceInfo.data.userId;
+    
+    // Validate channel name
+    if (!channelName || channelName.trim().length === 0) {
+      return {
+        success: false,
+        error: "Channel name is required",
+      };
+    }
+    
+    const normalizedName = channelName.trim().toLowerCase();
+    if (normalizedName.length < 1 || normalizedName.length > 80) {
+      return {
+        success: false,
+        error: "Channel name must be between 1 and 80 characters",
+      };
+    }
+    
+    // Call api-server to create channel using bot token
+    const { apiClient } = await import("@/lib/api-client");
+    const result = await apiClient<{
+      success: boolean;
+      data?: {
+        id: string;
+        name: string;
+        isPrivate: boolean;
+        userAdded?: boolean;
+      };
+      error?: string;
+      message?: string;
+    }>(`/api/workspace/${teamId}/channels`, {
+      method: 'POST',
+      body: {
+        name: normalizedName,
+        isPrivate: Boolean(isPrivate),
+        userId: userId,
+      },
+    });
+    
+    return result;
+  } catch (error) {
+    console.error("Error creating Slack channel:", error);
+    
+    // Check if it's a specific error from the API
+    if (error && typeof error === 'object' && 'data' in error) {
+      const errorData = error.data as { error?: string; message?: string };
+      if (errorData?.error === 'bot_not_installed') {
+        return {
+          success: false,
+          error: "bot_not_installed",
+          message: errorData.message || "Bot not installed in your workspace",
+        };
+      }
+      if (errorData?.error === 'name_taken') {
+        return {
+          success: false,
+          error: "name_taken",
+          message: errorData.message || "Channel name already exists",
+        };
+      }
+    }
+    
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to create channel",
     };
   }
 }
@@ -562,6 +1085,98 @@ export async function getCurrentUserConfig() {
 /**
  * Update inbound API key - saves only to local database
  */
+/**
+ * Get workspace configuration
+ */
+export async function getWorkspaceConfig() {
+  try {
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    const backendUrl = process.env.BACKEND_API_URL || "http://localhost:3668";
+    
+    const response = await fetch(`${backendUrl}/api/workspace/${teamId}/config`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.INTERNAL_API_KEY || ""}`,
+      },
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: errorData.error || "Failed to fetch workspace configuration",
+      };
+    }
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error("Error fetching workspace config:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to fetch workspace configuration",
+    };
+  }
+}
+
+/**
+ * Update workspace configuration
+ */
+export async function updateWorkspaceConfig(config: {
+  shouldShowFullEmail?: boolean;
+  sendingDomain?: string | null;
+}) {
+  try {
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    const backendUrl = process.env.BACKEND_API_URL || "http://localhost:3668";
+    
+    const response = await fetch(`${backendUrl}/api/workspace/${teamId}/config`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.INTERNAL_API_KEY || ""}`,
+      },
+      body: JSON.stringify(config),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: errorData.error || "Failed to update workspace configuration",
+      };
+    }
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error("Error updating workspace config:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to update workspace configuration",
+    };
+  }
+}
+
 export async function updateInboundApiKey(inboundApiKey: string) {
   try {
     const slackUserId = await getSlackUserId();

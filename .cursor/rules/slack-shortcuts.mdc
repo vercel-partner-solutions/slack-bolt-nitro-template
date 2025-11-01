@@ -1,5 +1,5 @@
 ---
-globs: src/bolt/listeners/shortcuts/**/*.ts
+globs: apps/api-server/src/bolt/listeners/shortcuts/**/*.ts
 description: Slack Shortcuts implementation guide
 ---
 
