@@ -17,6 +17,15 @@ export const validateInstallation: Middleware<SlackEventMiddlewareArgs> = async 
   
   if (!teamId) {
     logger.warn('Event missing team_id, skipping validation');
+    // Log the request in dev mode for debugging
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Request without team_id:', {
+        event,
+        eventType: (event as any).type,
+        eventSubtype: (event as any).subtype,
+        fullEvent: JSON.stringify(event, null, 2),
+      });
+    }
     // Allow event to proceed - some events might not have team_id
     return await next();
   }

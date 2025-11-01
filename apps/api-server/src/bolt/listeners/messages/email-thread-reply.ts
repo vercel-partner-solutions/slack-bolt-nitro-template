@@ -7,6 +7,37 @@ import { db, schema } from '../../../server/db';
 import { eq } from 'drizzle-orm';
 
 /**
+ * Helper function to map Slack file types to MIME types
+ */
+function getContentTypeFromFiletype(filetype: string): string {
+  const typeMap: Record<string, string> = {
+    // Images
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    // Documents
+    pdf: 'application/pdf',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    // Text
+    txt: 'text/plain',
+    csv: 'text/csv',
+    // Archives
+    zip: 'application/zip',
+    tar: 'application/x-tar',
+  };
+
+  return typeMap[filetype.toLowerCase()] || 'application/octet-stream';
+}
+
+/**
  * Handles when a user replies in a Slack thread to send an email reply via Inbound
  */
 export const emailThreadReply = async ({
@@ -20,8 +51,9 @@ export const emailThreadReply = async ({
       return;
     }
 
-    // Ignore bot messages and messages with subtypes (except for threaded_replies)
-    if (event.subtype && event.subtype !== 'thread_broadcast') {
+    // Ignore bot messages and messages with subtypes (except for threaded_replies and file_share)
+    // file_share subtype indicates a file was shared in the message
+    if (event.subtype && event.subtype !== 'thread_broadcast' && event.subtype !== 'file_share') {
       return;
     }
 
@@ -81,13 +113,140 @@ export const emailThreadReply = async ({
 
     // Get message text
     let messageText = 'text' in event ? event.text : '';
-    if (!messageText) {
-      logger.info('No text in message, skipping');
+    
+    // Process file attachments from Slack
+    const attachments: Array<{
+      filename: string;
+      content: string;
+      contentType: string;
+    }> = [];
+
+    // Check if message has files attached
+    // Files can be in the event directly (for file_share subtype) or we may need to fetch them
+    const eventWithFiles = event as typeof event & {
+      files?: Array<{
+        id: string;
+        name?: string;
+        mimetype?: string;
+        filetype?: string;
+        size?: number;
+        url_private?: string;
+        url_private_download?: string;
+      }>;
+    };
+    
+    if (eventWithFiles.files && eventWithFiles.files.length > 0) {
+      logger.info(`Processing ${eventWithFiles.files.length} file attachment(s) from Slack`);
+      
+      for (const file of eventWithFiles.files) {
+        try {
+          // If file object already has full details (from file_share subtype), use them directly
+          // Otherwise, fetch file info from Slack API
+          let fileData: {
+            id: string;
+            name?: string;
+            mimetype?: string;
+            filetype?: string;
+            size?: number;
+            url_private?: string;
+            url_private_download?: string;
+          };
+
+          if (file.url_private || file.url_private_download) {
+            // File object already has all the info we need
+            fileData = file;
+          } else {
+            // Need to fetch file info from Slack API
+            const fileInfo = await client.files.info({ file: file.id });
+            if (!fileInfo.file || !fileInfo.file.id) {
+              logger.warn(`File ${file.id} not found`);
+              continue;
+            }
+            // Map Slack File type to our expected structure
+            const slackFile = fileInfo.file;
+            fileData = {
+              id: slackFile.id || file.id, // Use original file.id as fallback
+              name: slackFile.name,
+              mimetype: slackFile.mimetype,
+              filetype: slackFile.filetype,
+              size: slackFile.size,
+              url_private: slackFile.url_private,
+              url_private_download: slackFile.url_private_download,
+            };
+          }
+
+          // Skip files that are too large (Inbound has size limits)
+          const fileSize = fileData.size || 0;
+          const maxSize = 25 * 1024 * 1024; // 25MB limit
+          if (fileSize > maxSize) {
+            logger.warn(`File ${fileData.name} is too large (${fileSize} bytes), skipping`);
+            continue;
+          }
+
+          // Get download URL - prefer url_private, fallback to url_private_download
+          const downloadUrl = fileData.url_private || fileData.url_private_download;
+          if (!downloadUrl) {
+            logger.warn(`No download URL available for file ${fileData.name || fileData.id}`);
+            continue;
+          }
+
+          logger.info(`Downloading file: ${fileData.name || fileData.id} (${fileSize} bytes)`);
+          
+          // Download file from Slack using bot token
+          // Slack's private URLs require authentication with the bot token
+          const token = process.env.SLACK_BOT_TOKEN;
+          if (!token) {
+            throw new Error('SLACK_BOT_TOKEN not configured');
+          }
+
+          const downloadResponse = await fetch(downloadUrl, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+
+          if (!downloadResponse.ok) {
+            throw new Error(`Failed to download file: ${downloadResponse.statusText}`);
+          }
+
+          const downloadedData = await downloadResponse.arrayBuffer();
+
+          // Convert to base64
+          const base64Content = Buffer.from(downloadedData).toString('base64');
+          
+          // Determine content type
+          const mimetype = fileData.mimetype || 
+            (fileData.filetype ? getContentTypeFromFiletype(fileData.filetype) : 'application/octet-stream');
+          
+          // Get filename
+          const filename = fileData.name || `attachment-${fileData.id}`;
+
+          attachments.push({
+            filename,
+            content: base64Content,
+            contentType: mimetype,
+          });
+
+          logger.info(`✅ Processed attachment: ${filename} (${mimetype})`);
+        } catch (error) {
+          logger.error(`Error processing file attachment ${file.id}:`, error);
+          // Continue processing other files even if one fails
+        }
+      }
+    }
+
+    // If no text and no attachments, skip
+    if (!messageText && attachments.length === 0) {
+      logger.info('No text or attachments in message, skipping');
       return;
     }
 
     // Convert Slack emoji syntax to Unicode emojis
-    messageText = await convertSlackEmojisToEmojis(messageText, client, 'html');
+    if (messageText) {
+      messageText = await convertSlackEmojisToEmojis(messageText, client, 'html');
+    } else {
+      messageText = ''; // Set empty string if no text
+    }
 
     // Get user info for the sender
     const userId = 'user' in event ? event.user : undefined;
@@ -118,7 +277,39 @@ export const emailThreadReply = async ({
     // Slack event types don't expose team_id in the type definition, but it exists at runtime
     // Use type-safe access instead of any
     const eventWithTeam = event as typeof event & { team?: string; team_id?: string };
-    const teamId = eventWithTeam.team || eventWithTeam.team_id;
+    let teamId = eventWithTeam.team || eventWithTeam.team_id;
+    
+    // If teamId is not in event (common with file_share subtype), try multiple fallback strategies
+    if (!teamId) {
+      // Strategy 1: Extract from file's user_team field (fastest, no API call)
+      const eventWithFilesForTeam = event as typeof event & {
+        files?: Array<{ user_team?: string }>;
+      };
+      if (eventWithFilesForTeam.files && eventWithFilesForTeam.files.length > 0) {
+        const fileTeamId = eventWithFilesForTeam.files[0]?.user_team;
+        if (fileTeamId) {
+          teamId = fileTeamId;
+          logger.debug(`Extracted teamId from file: ${teamId}`);
+        }
+      }
+      
+      // Strategy 2: Get from channel info (requires API call but very reliable)
+      if (!teamId && 'channel' in event && event.channel) {
+        try {
+          const channelInfo = await client.conversations.info({ channel: event.channel });
+          // biome-ignore lint/suspicious/noExplicitAny: Slack API types may not include context
+          const contextTeamId = (channelInfo.channel as any)?.context_team_id || 
+                                (channelInfo.channel as any)?.shared_team_id;
+          if (contextTeamId) {
+            teamId = contextTeamId;
+            logger.debug(`Extracted teamId from channel info: ${teamId}`);
+          }
+        } catch (error) {
+          logger.warn('Could not fetch channel info to get teamId:', error);
+        }
+      }
+    
+    }
     
     // Fetch workspace config to get sending domain
     let sendingDomain = 'inbound.new'; // Default fallback
@@ -133,6 +324,7 @@ export const emailThreadReply = async ({
         if (workspaceConfig.length > 0 && workspaceConfig[0].sendingDomain) {
           sendingDomain = workspaceConfig[0].sendingDomain;
         }
+        logger.debug(`Sending domain: ${sendingDomain}`);
       } catch (error) {
         logger.warn('Could not fetch workspace config for sending domain, using default:', error);
       }
@@ -283,11 +475,21 @@ export const emailThreadReply = async ({
       from: string;
       to?: string[];
       cc?: string[];
+      attachments?: Array<{
+        filename: string;
+        content: string;
+        contentType: string;
+      }>;
     } = {
-      html: messageText, // Use HTML format to support inline images for custom emojis
-      text: messageText.replace(/<img[^>]*>/g, ''), // Fallback plain text without img tags
+      html: messageText || '', // Use HTML format to support inline images for custom emojis
+      text: messageText ? messageText.replace(/<img[^>]*>/g, '') : 'Email with attachments', // Fallback plain text without img tags
       from: generatedEmail,
     };
+
+    // Add attachments if any were processed
+    if (attachments.length > 0) {
+      replyOptions.attachments = attachments;
+    }
 
     // Add recipients if we have them (reply-all functionality)
     if (replyTo.length > 0) {
