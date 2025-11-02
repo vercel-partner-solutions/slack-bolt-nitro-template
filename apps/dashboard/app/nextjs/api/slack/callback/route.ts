@@ -12,12 +12,23 @@ const IV_LENGTH = 16;
 const SALT_LENGTH = 32;
 const KEY_LENGTH = 32;
 
+/**
+ * Get encryption key from environment variable
+ */
+function getEncryptionKey(): string {
+  const key = process.env.ENCRYPTION_KEY;
+  if (!key) {
+    throw new Error('ENCRYPTION_KEY environment variable is not set');
+  }
+  return key;
+}
+
 function deriveKey(password: string, salt: Buffer): Buffer {
   return scryptSync(password, salt, KEY_LENGTH);
 }
 
 function encrypt(text: string): string {
-  const password = process.env.ENCRYPTION_KEY!;
+  const password = getEncryptionKey();
   const salt = randomBytes(SALT_LENGTH);
   const iv = randomBytes(IV_LENGTH);
   const key = deriveKey(password, salt);

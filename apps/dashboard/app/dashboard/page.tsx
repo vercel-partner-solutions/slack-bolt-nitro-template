@@ -77,6 +77,17 @@ export default function DashboardPage() {
     }
   }, [workspaceConfigResult?.sendingDomain]);
 
+  // Track if channelNamePrefix has been initialized to avoid debounce on initial load
+  const channelNamePrefixInitializedRef = useRef(false);
+
+  // Sync channelNamePrefix state with query data
+  useEffect(() => {
+    if (workspaceConfigResult?.channelNamePrefix !== undefined) {
+      setChannelNamePrefix(workspaceConfigResult.channelNamePrefix || "ext-inbd-*");
+      channelNamePrefixInitializedRef.current = true;
+    }
+  }, [workspaceConfigResult?.channelNamePrefix]);
+
   // Fetch user config for API key (needed for CommandPalette domains)
   const {
     data: workspaceInfoForUserId,
@@ -230,6 +241,7 @@ export default function DashboardPage() {
   // Local state for UI
   const [error, setError] = useState<string | null>(null);
   const [sendingDomain, setSendingDomain] = useState<string>("");
+  const [channelNamePrefix, setChannelNamePrefix] = useState<string>("");
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [createRouteInitialStep, setCreateRouteInitialStep] = useState<"root" | "email-address" | "channel-name" | "creating" | undefined>(undefined);
   const [channelSearchQuery, setChannelSearchQuery] = useState<string>("");
@@ -308,6 +320,26 @@ export default function DashboardPage() {
       setError(result.error || "Failed to save sending domain");
     }
   };
+
+  // Handle channel name prefix change - update UI immediately, debounce API call
+  const handleChannelNamePrefixChange = (value: string) => {
+    setChannelNamePrefix(value);
+    setError(null);
+  };
+
+  // Debounce the API call for channel name prefix (only after initialization)
+  useEffect(() => {
+    if (!channelNamePrefixInitializedRef.current) return;
+    if (channelNamePrefix === undefined || channelNamePrefix === "") return;
+    
+    const timeoutId = setTimeout(() => {
+      updateWorkspaceConfigMutation.mutate({
+        channelNamePrefix: channelNamePrefix.trim() || null,
+      });
+    }, 500); // 500ms debounce
+
+    return () => clearTimeout(timeoutId);
+  }, [channelNamePrefix]);
 
   // Extract error message from channels query
   const channelsErrorMessage = channelsError?.error === "bot_not_installed"
@@ -962,6 +994,42 @@ export default function DashboardPage() {
                         Saving...
                       </p>
                     ) : null}
+                  </div>
+                </div>
+
+                {/* Channel name prefix configuration */}
+                <div className="grid-cols-2 gap-2 grid items-start">
+                  <div className="col-span-1">
+                    <label
+                      htmlFor="channel-name-prefix"
+                      className="text-sm font-medium text-foreground block mb-1"
+                    >
+                      Channel name prefix
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Prefix applied to all new channels created. Use <span className="font-mono text-xs">*</span> as a placeholder for the channel name.
+                    </p>
+                  </div>
+                  <div className="col-span-1">
+                    <Input
+                      id="channel-name-prefix"
+                      type="text"
+                      value={channelNamePrefix}
+                      onChange={(e) => handleChannelNamePrefixChange(e.target.value)}
+                      disabled={updateWorkspaceConfigMutation.isPending || isInitialLoading}
+                      placeholder="ext-inbd-*"
+                      className="w-full font-mono text-sm"
+                    />
+                    {updateWorkspaceConfigMutation.isPending ? (
+                      <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        Saving...
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Example: Creating "support" with prefix "ext-inbd-*" results in "ext-inbd-support"
+                      </p>
+                    )}
                   </div>
                 </div>
 

@@ -2,6 +2,7 @@ import type { InboundWebhookPayload } from '@inboundemail/sdk';
 import { eventHandler, readBody } from 'h3';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { WebClient } from '@slack/web-api';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db';
@@ -11,7 +12,7 @@ import { threadStorage, type EmailRecipients } from '../../bolt/utils/thread-sto
 import { installationStore } from '../../bolt/utils/installation-store';
 
 // Development mode - saves POST payloads to .data/requests/ for replay testing
-const LOCAL_DEV = true;
+const LOCAL_DEV = false;
 
 /**
  * Generate an avatar URL using inbound.new avatar API
@@ -23,6 +24,45 @@ function getAvatarUrl(name: string, email: string): string {
   });
 
   return `https://inbound.new/api/avatar?${params.toString()}`;
+}
+
+/**
+ * Generate a unique fingerprint for an email to detect duplicates across reply-all scenarios.
+ * 
+ * The fingerprint is based on:
+ * 1. Message-ID header (if available) - standard email identifier that persists across recipients
+ * 2. Fallback: threadId + from address + subject + content hash + timestamp (rounded to nearest minute)
+ * 
+ * This ensures that when reply-all includes multiple SlackBound addresses, we only process
+ * the email once even if Inbound sends separate webhooks with different email.id values.
+ */
+function generateEmailFingerprint(email: InboundWebhookPayload['email'], contentHash: string): string {
+  // Try to use Message-ID header if available (most reliable)
+  // biome-ignore lint/suspicious/noExplicitAny: Inbound SDK types may not include messageId
+  const messageId = (email as any).messageId || (email as any).headers?.['message-id'] || (email as any).headers?.['Message-ID'];
+  
+  if (messageId) {
+    // Normalize Message-ID (remove angle brackets, whitespace, and domain)
+    // AWS SES adds domain like @us-east-2.amazonses.com to Message-IDs
+    let normalizedMessageId = messageId.replace(/^<|>$/g, '').trim();
+    // Strip domain if present (everything after @) to match awsMessageId from API
+    normalizedMessageId = normalizedMessageId.split('@')[0];
+    return `msgid:${normalizedMessageId}`;
+  }
+  
+  // Fallback fingerprint based on email characteristics
+  // Round timestamp to nearest minute to handle slight timing differences
+  const timestamp = new Date().toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM
+  
+  const fromAddress = email.from?.addresses?.[0]?.address || 'unknown';
+  const threadId = email.threadId || 'no-thread';
+  const subject = email.subject || '(No Subject)';
+  
+  // Create a composite key: thread + from + subject + content hash + timestamp
+  const composite = `${threadId}|${fromAddress}|${subject}|${contentHash}|${timestamp}`;
+  
+  // Hash it for consistent length and to avoid issues with special characters
+  return `composite:${createHash('sha256').update(composite).digest('hex').substring(0, 16)}`;
 }
 
 export default eventHandler(async (event) => {
@@ -62,13 +102,54 @@ export default eventHandler(async (event) => {
       console.log('[INBOUND] 📎 No attachments');
     }
 
-    // Atomic idempotency check: Check and mark as processed in one operation
-    // Skip idempotency check in LOCAL_DEV mode to allow replaying requests
+    const fromAddress = email.from?.addresses?.[0];
+    const fromName = fromAddress?.name || fromAddress?.address || 'Unknown';
+    const fromEmail = fromAddress?.address || '';
+    const subject = email.subject || '(No Subject)';
+
+    // Parse email content early to generate fingerprint for duplicate detection
+    console.log('[INBOUND] 📝 Parsing email content...');
+    const { text: cleanedText, images } = parseEmailContent(email);
+    console.log(`[INBOUND] 📝 Parsed ${cleanedText.length} chars, ${images.length} images`);
+
+    // Generate content hash for fingerprinting (use cleaned text + subject for consistency)
+    const contentHash = createHash('sha256')
+      .update(cleanedText + subject)
+      .digest('hex')
+      .substring(0, 16);
+
+    // Generate email fingerprint for duplicate detection (handles reply-all scenarios)
+    const emailFingerprint = generateEmailFingerprint(email, contentHash);
+    console.log(`[INBOUND] 🔑 Email fingerprint: ${emailFingerprint}`);
+
+    // Check if this email was sent by us (from Slack) - if so, skip processing to avoid loops
+    const sentByUs = await threadStorage.wasEmailSentByUs(emailFingerprint);
+    if (sentByUs) {
+      console.log(`[INBOUND] 🔄 Email was sent by us (from Slack), skipping to avoid loop`);
+      console.log(`  Email ID: ${email.id}`);
+      console.log(`  Fingerprint: ${emailFingerprint}`);
+      console.log(`  Thread ID: ${email.threadId || 'none'}`);
+      console.log(`  Subject: ${email.subject || '(No Subject)'}`);
+      // Mark as processed to avoid future checks
+      await threadStorage.markEmailProcessed(email.id);
+      return {
+        success: true,
+        skipped: true,
+        reason: 'sent_by_us',
+        emailId: email.id,
+        fingerprint: emailFingerprint,
+      };
+    }
+
+    // Dual idempotency check: both email.id and fingerprint
+    console.log('[INBOUND] 🔍 Checking idempotency...');
+    
+    // Check by email ID (fast path - existing mechanism)
+    // In LOCAL_DEV mode, skip email.id check to allow request replays from .data/requests/
     if (!LOCAL_DEV) {
-      console.log('[INBOUND] 🔍 Checking idempotency...');
-      const alreadyProcessed = await threadStorage.checkAndMarkEmailProcessed(email.id);
-      if (alreadyProcessed) {
-        console.log(`[IDEMPOTENCY] ⏭️  Email ${email.id} already processed, skipping duplicate webhook`);
+      const alreadyProcessedById = await threadStorage.checkAndMarkEmailProcessed(email.id);
+      if (alreadyProcessedById) {
+        console.log(`[IDEMPOTENCY] ⏭️  Email ${email.id} already processed (by ID), skipping duplicate webhook`);
         console.log(`  Thread ID: ${email.threadId || 'none'}`);
         console.log(`  Subject: ${email.subject || '(No Subject)'}`);
         return {
@@ -78,20 +159,33 @@ export default eventHandler(async (event) => {
           emailId: email.id,
         };
       }
-      console.log(`[IDEMPOTENCY] ✅ Processing email ${email.id} for the first time`);
     } else {
-      console.log('[LOCAL_DEV] ⚠️  Idempotency check SKIPPED for testing');
+      console.log('[LOCAL_DEV] ⚠️  Email ID check SKIPPED (allows request replay for testing)');
     }
-
-    const fromAddress = email.from?.addresses?.[0];
-    const fromName = fromAddress?.name || fromAddress?.address || 'Unknown';
-    const fromEmail = fromAddress?.address || '';
-    const subject = email.subject || '(No Subject)';
-
-    // Parse email content with HTML conversion and image extraction
-    console.log('[INBOUND] 📝 Parsing email content...');
-    const { text: cleanedText, images } = parseEmailContent(email);
-    console.log(`[INBOUND] 📝 Parsed ${cleanedText.length} chars, ${images.length} images`);
+    
+    // ALWAYS check by fingerprint (handles reply-all duplicates with different email.id)
+    // This runs even in LOCAL_DEV to prevent duplicate messages in Slack
+    const alreadyProcessedByFingerprint = await threadStorage.checkAndMarkEmailFingerprint(emailFingerprint);
+    if (alreadyProcessedByFingerprint) {
+      console.log(`[IDEMPOTENCY] ⏭️  Email already processed (by fingerprint), skipping duplicate reply-all`);
+      console.log(`  Email ID: ${email.id}`);
+      console.log(`  Fingerprint: ${emailFingerprint}`);
+      console.log(`  Thread ID: ${email.threadId || 'none'}`);
+      console.log(`  Subject: ${email.subject || '(No Subject)'}`);
+      // Also mark the email.id as processed to avoid future checks
+      if (!LOCAL_DEV) {
+        await threadStorage.markEmailProcessed(email.id);
+      }
+      return {
+        success: true,
+        skipped: true,
+        reason: 'duplicate_fingerprint',
+        emailId: email.id,
+        fingerprint: emailFingerprint,
+      };
+    }
+    
+    console.log(`[IDEMPOTENCY] ✅ Processing email ${email.id} for the first time`);
 
     // Extract recipient information for reply-all functionality
     const recipients: EmailRecipients = {
@@ -120,12 +214,20 @@ export default eventHandler(async (event) => {
     let slackThreadTs: string | undefined;
 
     console.log('[INBOUND] 🧵 Checking for existing thread...');
+    let storedChannelId: string | null = null;
     if (inboundThreadId) {
       // Try to find existing Slack thread
       const existingThreadTs = await threadStorage.getSlackThreadTs(inboundThreadId);
       if (existingThreadTs) {
         slackThreadTs = existingThreadTs;
+        // Retrieve the channel ID where this thread exists
+        storedChannelId = await threadStorage.getChannelId(inboundThreadId);
         console.log(`[INBOUND] ✅ Found existing thread: ${inboundThreadId} -> ${slackThreadTs}`);
+        if (storedChannelId) {
+          console.log(`[INBOUND] 📍 Thread exists in channel: ${storedChannelId}`);
+        } else {
+          console.log(`[INBOUND] ⚠️  No channel ID stored for thread (may be from old data)`);
+        }
       } else {
         console.log(`[INBOUND] 🆕 No existing thread found for ${inboundThreadId}, will create new`);
       }
@@ -275,7 +377,40 @@ export default eventHandler(async (event) => {
     console.log('[INBOUND] 👤 Bot appearance:');
     console.log(`  Avatar: ${avatarUrl}`);
 
-    // Look up email route to determine workspace and channel
+    // For thread replies, we use the stored channel ID instead of route lookup
+    // For new threads, we look up the route based on recipient email
+    let routes: Array<typeof schema.emailRoutes.$inferSelect> = [];
+    
+    if (slackThreadTs && storedChannelId) {
+      // This is a reply to an existing thread - we need to find the route for the stored channel
+      // We need to find which workspace/route this channel belongs to
+      console.log(`[INBOUND] 🔄 Thread reply detected - looking up route for stored channel: ${storedChannelId}`);
+      
+      // Find route that matches this channel
+      const channelRoutes = await db.query.emailRoutes.findMany({
+        where: eq(schema.emailRoutes.channelId, storedChannelId),
+      });
+      
+      if (channelRoutes.length > 0) {
+        routes = channelRoutes;
+        console.log(`[INBOUND] ✅ Found ${routes.length} route(s) for thread channel: ${storedChannelId}`);
+      } else {
+        console.error(`[INBOUND] ❌ No route found for stored channel: ${storedChannelId}`);
+        // Fall back to recipient-based lookup
+        const toEmail = email.to?.addresses?.[0]?.address;
+        if (toEmail) {
+          console.log(`[INBOUND] 🔄 Falling back to recipient-based route lookup for: ${toEmail}`);
+          const normalizedEmail = toEmail.toLowerCase();
+          routes = await db.query.emailRoutes.findMany({
+            where: eq(schema.emailRoutes.emailAddress, normalizedEmail),
+          });
+          if (routes.length === 0) {
+            console.error(`[INBOUND] ❌ No route found for email (fallback): ${toEmail}`);
+          }
+        }
+      }
+    } else {
+      // New thread - look up route based on recipient email
     const toEmail = email.to?.addresses?.[0]?.address;
     if (!toEmail) {
       console.error('[INBOUND] ❌ No destination email address found');
@@ -290,7 +425,7 @@ export default eventHandler(async (event) => {
     const normalizedEmail = toEmail.toLowerCase();
     console.log(`[INBOUND] 🔍 Looking up route for: ${normalizedEmail}`);
 
-    const routes = await db.query.emailRoutes.findMany({
+      routes = await db.query.emailRoutes.findMany({
       where: eq(schema.emailRoutes.emailAddress, normalizedEmail),
     });
 
@@ -303,6 +438,16 @@ export default eventHandler(async (event) => {
     }
 
     console.log(`[INBOUND] ✅ Found ${routes.length} route(s) for ${toEmail}`);
+    }
+
+    // Ensure we have routes to post to
+    if (routes.length === 0) {
+      console.error('[INBOUND] ❌ No routes found after all lookup attempts');
+      return {
+        success: false,
+        error: 'No route configured for this email',
+      };
+    }
 
     // Post to each matching route (usually just one)
     const responses = [];
@@ -336,15 +481,20 @@ export default eventHandler(async (event) => {
         const fullUsername = shouldShowFullEmail ? `${fromName} <${fromEmail}>` : fromName;
 
         // Determine target (channel or DM)
-        const target = route.channelId || route.userId;
+        // For thread replies, use stored channel ID; for new threads, use route channel
+        const target = (slackThreadTs && storedChannelId) ? storedChannelId : (route.channelId || route.userId);
         if (!target) {
           console.error(`[INBOUND] ❌ Route has no channelId or userId for team: ${route.teamId}`);
           continue;
         }
 
+        if (slackThreadTs && storedChannelId) {
+          console.log(`[INBOUND] 📤 Posting thread reply to stored channel: ${target} (thread: ${slackThreadTs})`);
+        } else {
         console.log(
           `[INBOUND] 📤 Posting to ${route.channelId ? 'channel' : 'user'}: ${target}${slackThreadTs ? ` (thread: ${slackThreadTs})` : ''}`,
         );
+        }
         console.log(`[INBOUND] 👤 Username format: ${shouldShowFullEmail ? 'full email' : 'name only'}`);
 
         const totalAttachments = imageUrls.length + fileLinks.length;
@@ -381,17 +531,20 @@ export default eventHandler(async (event) => {
         const finalSlackThreadTs = response.ts || slackThreadTs;
         if (inboundThreadId && finalSlackThreadTs && !slackThreadTs) {
           console.log('[INBOUND] 💾 Storing new thread mapping...');
-          await threadStorage.set(inboundThreadId, finalSlackThreadTs, email.id);
+          // Store channel ID with thread mapping
+          await threadStorage.set(inboundThreadId, finalSlackThreadTs, email.id, target);
           // Store recipients for reply-all functionality
           await threadStorage.setEmailRecipients(finalSlackThreadTs, recipients);
           console.log(`[THREAD MAPPING] ✅ Created new: ${inboundThreadId} -> ${finalSlackThreadTs}`);
           console.log(`  Email ID: ${email.id}`);
+          console.log(`  Channel ID: ${target}`);
           console.log(`  Recipients stored: To=${recipients.to.length}, CC=${recipients.cc?.length || 0}`);
         } else if (inboundThreadId && slackThreadTs) {
           // Update recipients for existing thread (in case this is a new message with different recipients)
           await threadStorage.setEmailRecipients(slackThreadTs, recipients);
           console.log(`[THREAD MAPPING] ℹ️  Using existing: ${inboundThreadId} -> ${slackThreadTs}`);
           console.log(`  Email ID: ${email.id}`);
+          console.log(`  Channel ID: ${target}`);
           console.log(`  Recipients updated: To=${recipients.to.length}, CC=${recipients.cc?.length || 0}`);
         }
       } catch (error) {

@@ -1,5 +1,6 @@
 import { Inbound } from '@inboundemail/sdk';
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from '@slack/bolt';
+import { createHash } from 'node:crypto';
 import { getInboundApiKey } from '../../utils/config';
 import { convertSlackEmojisToEmojis } from '../../utils/slack-emoji-converter';
 import { threadStorage } from '../../utils/thread-storage';
@@ -97,6 +98,31 @@ export const emailThreadReply = async ({
           '  This thread may have been created before the email integration was set up.',
       );
       return;
+    }
+
+    // Extract subject from parent message (first message in thread usually has subject)
+    let subject = '(No Subject)';
+    try {
+      const channel = 'channel' in event ? event.channel : '';
+      const threadInfo = await client.conversations.replies({
+        channel,
+        ts: event.thread_ts,
+        limit: 1,
+        inclusive: true,
+      });
+      const parentMsg = threadInfo.messages?.[0];
+      if (parentMsg?.text) {
+        // Extract subject if it's in the format "**Subject**\n\nBody" (first message format)
+        const lines = parentMsg.text.split('\n');
+        if (lines.length > 0 && lines[0].startsWith('**') && lines[0].endsWith('**')) {
+          subject = lines[0].replace(/^\*\*|\*\*$/g, '');
+        } else {
+          // Fallback: use threadId as identifier
+          subject = `Thread ${inboundThreadId.substring(0, 10)}`;
+        }
+      }
+    } catch (error) {
+      logger.warn('Could not fetch subject from parent message, using fallback:', error);
     }
 
     // Get the original email ID
@@ -502,6 +528,32 @@ export const emailThreadReply = async ({
     const response = await inbound.reply(emailId, replyOptions);
 
     logger.info(`Email reply sent successfully: ${response.data?.id}`);
+
+    // Track this email as sent by us to prevent processing it when it comes back via webhook
+    // Generate fingerprint the same way as inbound.post.ts does
+    const contentHash = createHash('sha256')
+      .update((messageText || '').replace(/<img[^>]*>/g, '') + (subject || ''))
+      .digest('hex')
+      .substring(0, 16);
+    
+    // Try to get AWS Message-ID from response (this is what comes back in webhooks)
+    // biome-ignore lint/suspicious/noExplicitAny: Inbound SDK types may not include awsMessageId
+    const awsMessageId = (response.data as any)?.awsMessageId;
+    
+    if (awsMessageId) {
+      // AWS Message-IDs don't have angle brackets, but normalize just in case
+      const normalizedMessageId = awsMessageId.replace(/^<|>$/g, '').trim();
+      const fingerprint = `msgid:${normalizedMessageId}`;
+      await threadStorage.markEmailSentByUs(fingerprint);
+      logger.info(`Marked sent email as ours (AWS Message-ID): ${fingerprint}`);
+    } else {
+      // Fallback: use composite fingerprint (same logic as inbound.post.ts)
+      const timestamp = new Date().toISOString().slice(0, 16);
+      const composite = `${inboundThreadId}|${senderEmailAddress}|${subject || '(No Subject)'}|${contentHash}|${timestamp}`;
+      const fingerprint = `composite:${createHash('sha256').update(composite).digest('hex').substring(0, 16)}`;
+      await threadStorage.markEmailSentByUs(fingerprint);
+      logger.info(`Marked sent email as ours (composite): ${fingerprint}`);
+    }
 
     // Note: Message is already marked as processed by the atomic check at the beginning
 

@@ -29,15 +29,21 @@ export interface EmailRecipients {
 }
 
 interface ThreadStorage {
-  set(inboundThreadId: string, slackThreadTs: string, emailId: string): Promise<void>;
+  set(inboundThreadId: string, slackThreadTs: string, emailId: string, channelId: string): Promise<void>;
   getSlackThreadTs(inboundThreadId: string): Promise<string | null>;
   getInboundThreadId(slackThreadTs: string): Promise<string | null>;
   getEmailId(slackThreadTs: string): Promise<string | null>;
+  getChannelId(inboundThreadId: string): Promise<string | null>;
+  getChannelIdBySlackTs(slackThreadTs: string): Promise<string | null>;
   setEmailRecipients(slackThreadTs: string, recipients: EmailRecipients): Promise<void>;
   getEmailRecipients(slackThreadTs: string): Promise<EmailRecipients | null>;
   hasProcessedEmail(emailId: string): Promise<boolean>;
   markEmailProcessed(emailId: string): Promise<void>;
   checkAndMarkEmailProcessed(emailId: string): Promise<boolean>;
+  hasProcessedEmailFingerprint(fingerprint: string): Promise<boolean>;
+  checkAndMarkEmailFingerprint(fingerprint: string): Promise<boolean>;
+  markEmailSentByUs(identifier: string): Promise<void>;
+  wasEmailSentByUs(identifier: string): Promise<boolean>;
   markSlackMessageProcessed(messageTs: string): Promise<void>;
   hasProcessedSlackMessage(messageTs: string): Promise<boolean>;
   checkAndMarkSlackMessageProcessed(messageTs: string): Promise<boolean>;
@@ -45,15 +51,19 @@ interface ThreadStorage {
 
 // In-memory storage (not persistent across restarts)
 class InMemoryThreadStorage implements ThreadStorage {
-  private inboundToSlack = new Map<string, { slackThreadTs: string; emailId: string }>();
+  private inboundToSlack = new Map<string, { slackThreadTs: string; emailId: string; channelId: string }>();
   private slackToInbound = new Map<string, string>();
+  private slackToChannel = new Map<string, string>();
   private emailRecipients = new Map<string, EmailRecipients>();
   private processedEmails = new Set<string>();
+  private processedEmailFingerprints = new Set<string>();
+  private sentByUs = new Set<string>(); // Track emails we sent (by Message-ID or fingerprint)
   private processedSlackMessages = new Set<string>();
 
-  async set(inboundThreadId: string, slackThreadTs: string, emailId: string): Promise<void> {
-    this.inboundToSlack.set(inboundThreadId, { slackThreadTs, emailId });
+  async set(inboundThreadId: string, slackThreadTs: string, emailId: string, channelId: string): Promise<void> {
+    this.inboundToSlack.set(inboundThreadId, { slackThreadTs, emailId, channelId });
     this.slackToInbound.set(slackThreadTs, inboundThreadId);
+    this.slackToChannel.set(slackThreadTs, channelId);
     this.processedEmails.add(emailId);
   }
 
@@ -69,6 +79,14 @@ class InMemoryThreadStorage implements ThreadStorage {
     const inboundThreadId = await this.getInboundThreadId(slackThreadTs);
     if (!inboundThreadId) return null;
     return this.inboundToSlack.get(inboundThreadId)?.emailId || null;
+  }
+
+  async getChannelId(inboundThreadId: string): Promise<string | null> {
+    return this.inboundToSlack.get(inboundThreadId)?.channelId || null;
+  }
+
+  async getChannelIdBySlackTs(slackThreadTs: string): Promise<string | null> {
+    return this.slackToChannel.get(slackThreadTs) || null;
   }
 
   async setEmailRecipients(slackThreadTs: string, recipients: EmailRecipients): Promise<void> {
@@ -97,6 +115,26 @@ class InMemoryThreadStorage implements ThreadStorage {
     }
     this.processedEmails.add(emailId);
     return false; // First time processing
+  }
+
+  async hasProcessedEmailFingerprint(fingerprint: string): Promise<boolean> {
+    return this.processedEmailFingerprints.has(fingerprint);
+  }
+
+  async checkAndMarkEmailFingerprint(fingerprint: string): Promise<boolean> {
+    if (this.processedEmailFingerprints.has(fingerprint)) {
+      return true; // Already processed
+    }
+    this.processedEmailFingerprints.add(fingerprint);
+    return false; // First time processing
+  }
+
+  async markEmailSentByUs(identifier: string): Promise<void> {
+    this.sentByUs.add(identifier);
+  }
+
+  async wasEmailSentByUs(identifier: string): Promise<boolean> {
+    return this.sentByUs.has(identifier);
   }
 
   async markSlackMessageProcessed(messageTs: string): Promise<void> {
@@ -131,16 +169,17 @@ class RedisThreadStorage implements ThreadStorage {
     });
   }
 
-  async set(inboundThreadId: string, slackThreadTs: string, emailId: string): Promise<void> {
+  async set(inboundThreadId: string, slackThreadTs: string, emailId: string, channelId: string): Promise<void> {
     await Promise.all([
-      this.redis.set(`inbound:${inboundThreadId}`, JSON.stringify({ slackThreadTs, emailId })),
+      this.redis.set(`inbound:${inboundThreadId}`, JSON.stringify({ slackThreadTs, emailId, channelId })),
       this.redis.set(`slack:${slackThreadTs}`, inboundThreadId),
+      this.redis.set(`channel:${slackThreadTs}`, channelId),
       this.redis.set(`email:${emailId}`, '1'), // Mark as processed
     ]);
   }
 
   async getSlackThreadTs(inboundThreadId: string): Promise<string | null> {
-    const data = await this.redis.get<{ slackThreadTs: string; emailId: string }>(`inbound:${inboundThreadId}`);
+    const data = await this.redis.get<{ slackThreadTs: string; emailId: string; channelId: string }>(`inbound:${inboundThreadId}`);
     if (!data) return null;
     // Upstash Redis auto-deserializes JSON, so data is already an object
     if (typeof data === 'string') {
@@ -157,7 +196,7 @@ class RedisThreadStorage implements ThreadStorage {
   async getEmailId(slackThreadTs: string): Promise<string | null> {
     const inboundThreadId = await this.getInboundThreadId(slackThreadTs);
     if (!inboundThreadId) return null;
-    const data = await this.redis.get<{ slackThreadTs: string; emailId: string }>(`inbound:${inboundThreadId}`);
+    const data = await this.redis.get<{ slackThreadTs: string; emailId: string; channelId: string }>(`inbound:${inboundThreadId}`);
     if (!data) return null;
     // Upstash Redis auto-deserializes JSON, so data is already an object
     if (typeof data === 'string') {
@@ -165,6 +204,21 @@ class RedisThreadStorage implements ThreadStorage {
       return parsed.emailId;
     }
     return data.emailId;
+  }
+
+  async getChannelId(inboundThreadId: string): Promise<string | null> {
+    const data = await this.redis.get<{ slackThreadTs: string; emailId: string; channelId: string }>(`inbound:${inboundThreadId}`);
+    if (!data) return null;
+    // Upstash Redis auto-deserializes JSON, so data is already an object
+    if (typeof data === 'string') {
+      const parsed = JSON.parse(data);
+      return parsed.channelId;
+    }
+    return data.channelId;
+  }
+
+  async getChannelIdBySlackTs(slackThreadTs: string): Promise<string | null> {
+    return await this.redis.get<string>(`channel:${slackThreadTs}`);
   }
 
   async setEmailRecipients(slackThreadTs: string, recipients: EmailRecipients): Promise<void> {
@@ -194,6 +248,33 @@ class RedisThreadStorage implements ThreadStorage {
     // Use Redis SETNX (SET if Not eXists) for atomic check-and-set
     const result = await this.redis.setnx(`email:${emailId}`, '1');
     return result === 0; // Returns 0 if key already existed (already processed)
+  }
+
+  async hasProcessedEmailFingerprint(fingerprint: string): Promise<boolean> {
+    const result = await this.redis.get(`emailfp:${fingerprint}`);
+    return result !== null;
+  }
+
+  async checkAndMarkEmailFingerprint(fingerprint: string): Promise<boolean> {
+    // Use Redis SETNX (SET if Not eXists) for atomic check-and-set
+    // Set with 24 hour expiration to prevent storage bloat
+    const result = await this.redis.setnx(`emailfp:${fingerprint}`, '1');
+    if (result === 1) {
+      // First time - set expiration
+      await this.redis.expire(`emailfp:${fingerprint}`, 86400); // 24 hours
+    }
+    return result === 0; // Returns 0 if key already existed (already processed)
+  }
+
+  async markEmailSentByUs(identifier: string): Promise<void> {
+    // Store with 24 hour expiration to prevent storage bloat
+    await this.redis.set(`sentbyus:${identifier}`, '1');
+    await this.redis.expire(`sentbyus:${identifier}`, 86400); // 24 hours
+  }
+
+  async wasEmailSentByUs(identifier: string): Promise<boolean> {
+    const result = await this.redis.get(`sentbyus:${identifier}`);
+    return result !== null;
   }
 
   async markSlackMessageProcessed(messageTs: string): Promise<void> {
