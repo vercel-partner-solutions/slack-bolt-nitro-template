@@ -449,9 +449,16 @@ export default eventHandler(async (event) => {
       };
     }
 
+    // For thread replies, only use the first route to avoid posting the same message
+    // multiple times when multiple email addresses route to the same channel
+    const routesToPost = slackThreadTs ? [routes[0]] : routes;
+    if (slackThreadTs && routes.length > 1) {
+      console.log(`[INBOUND] ℹ️  Thread reply - using first route only (${routes.length} routes found)`);
+    }
+
     // Post to each matching route (usually just one)
     const responses = [];
-    for (const route of routes) {
+    for (const route of routesToPost) {
       if (!route.isActive) {
         console.log(`[INBOUND] ⏭️  Skipping inactive route for team: ${route.teamId}`);
         continue;
