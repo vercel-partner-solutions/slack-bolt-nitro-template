@@ -20,6 +20,12 @@ export const emailRoutes = pgTable("email_routes", {
   // Target user (for DM routing - alternative to channel)
   userId: text("user_id"),
   
+  // Inbound.new email ID (present if route has an endpoint)
+  inboundEmailId: text("inbound_email_id"),
+  
+  // Route type: 'primary' for user-created routes, 'auto' for auto-generated sender routes
+  routeType: text("route_type").notNull().default("primary"),
+  
   // Route state
   isActive: boolean("is_active").notNull().default(true),
   

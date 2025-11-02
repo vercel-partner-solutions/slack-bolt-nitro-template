@@ -249,7 +249,7 @@ export async function createEmailAddress(emailAddress: string) {
  */
 export async function linkChannelAndEmail(
   channelId: string,
-  emailId: string,
+  inboundEmailId: string,
   emailAddress: string,
   channelName?: string
 ) {
@@ -304,6 +304,8 @@ export async function linkChannelAndEmail(
           channelId,
           channelName: finalChannelName,
           teamId,
+          inboundEmailId,
+          routeType: 'primary',
           isActive: true,
           updatedAt: new Date(),
         })
@@ -315,6 +317,8 @@ export async function linkChannelAndEmail(
         channelId,
         channelName: finalChannelName,
         teamId,
+        inboundEmailId,
+        routeType: 'primary',
         isActive: true,
         updatedAt: new Date(),
       });
@@ -349,16 +353,19 @@ export async function fetchEmailRoutes() {
     
     const teamId = workspaceInfo.data.teamId;
     
-    // Fetch routes from database
+    // Fetch routes from database (only primary routes - user-created, not auto-generated)
     const db = getDb();
     const routes = await db
       .select()
       .from(emailRoutes)
       .where(eq(emailRoutes.teamId, teamId));
     
+    // Filter to only primary routes (excludes auto-created sender routes from replies)
+    const primaryRoutes = routes.filter(route => route.routeType === 'primary');
+    
     return {
       success: true,
-      data: routes,
+      data: primaryRoutes,
     };
   } catch (error) {
     console.error("Error fetching email routes:", error);

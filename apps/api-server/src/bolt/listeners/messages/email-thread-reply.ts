@@ -440,11 +440,15 @@ export const emailThreadReply = async ({
                   });
 
                   if (emailResponse.ok) {
-                    // Create route in database
+                    const emailData = (await emailResponse.json()) as { id: string };
+                    
+                    // Create route in database with inboundEmailId (marked as 'auto' type)
                     await db.insert(schema.emailRoutes).values({
                       emailAddress: normalizedSenderEmail,
                       teamId,
                       channelId: channelId || null,
+                      inboundEmailId: emailData.id,
+                      routeType: 'auto',
                       isActive: true,
                     });
 

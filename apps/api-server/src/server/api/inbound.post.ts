@@ -1,6 +1,5 @@
 import type { InboundWebhookPayload } from '@inboundemail/sdk';
-import { Inbound, verifyWebhookFromHeaders } from '@inboundemail/sdk';
-import { eventHandler, readBody, createError } from 'h3';
+import { eventHandler, readBody } from 'h3';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -70,23 +69,6 @@ export default eventHandler(async (event) => {
   console.log('[INBOUND] 📬 Received webhook request');
 
   try {
-    // Verify webhook authenticity using Inbound.new SDK
-    const inbound = new Inbound(getInboundApiKey());
-    const isValid = await verifyWebhookFromHeaders(event.node.req.headers as unknown as Headers, inbound);
-    
-    if (!isValid) {
-      console.warn('[INBOUND] ⚠️  Webhook verification failed', {
-        endpointId: event.node.req.headers['x-endpoint-id'],
-        timestamp: new Date().toISOString(),
-      });
-      throw createError({
-        statusCode: 401,
-        statusMessage: 'Unauthorized - Invalid webhook verification',
-      });
-    }
-    
-    console.log('[INBOUND] ✅ Webhook verified successfully');
-
     const payload: InboundWebhookPayload = await readBody(event);
 
     // Save payload to file in LOCAL_DEV mode for replay testing
@@ -104,6 +86,30 @@ export default eventHandler(async (event) => {
 
     // Extract email data
     const { email } = payload;
+
+    // Verify webhook authenticity using Inbound API via a GET request to the /v2/api/emails/{emailId} endpoint
+    const emailId = email.id;
+    const emailResponse = await fetch(`https://inbound.new/api/v2/emails/${emailId}`, {
+      headers: {
+        'Authorization': `Bearer ${getInboundApiKey()}`,
+      },
+    });
+    if (!emailResponse.ok) {
+      console.log(`[INBOUND] ❌ Failed to verify webhook authenticity: ${emailResponse.statusText}`);
+      return {  
+        success: false,
+        message: 'Unauthorized',
+      };
+    }
+    const emailData = (await emailResponse.json()) as { id: string };
+    if (emailData.id !== emailId) {
+      console.log(`[INBOUND] ❌ Failed to verify webhook authenticity: email ID mismatch`);
+      return {
+        success: false,
+        message: 'Unauthorized',
+      };
+    }
+
     console.log('[INBOUND] ✉️  Processing email:');
     console.log(`  ID: ${email.id}`);
     console.log(`  Thread ID: ${email.threadId || 'none'}`);
