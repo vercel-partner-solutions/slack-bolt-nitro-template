@@ -26,6 +26,9 @@ export const workspaceConfig = pgTable("workspace_config", {
   // Channel name prefix for new channels (default: "ext-inbd-*")
   channelNamePrefix: text("channel_name_prefix"),
   
+  // Inbound.new API key for this workspace
+  inboundApiKey: text("inbound_api_key"),
+  
   // Timestamps
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

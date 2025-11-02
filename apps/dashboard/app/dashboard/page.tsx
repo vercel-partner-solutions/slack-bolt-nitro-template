@@ -25,6 +25,8 @@ import {
   fetchEmailRoutes,
   deleteEmailRoute,
   getLocalUserConfig,
+  ensureUserInOrganization,
+  getCurrentUserRole,
 } from "@/app/actions/user-config";
 import { Input } from "@/components/ui/input";
 import { LottieIcon } from "@/components/lotties/lottie-icon";
@@ -32,6 +34,7 @@ import slackLogoAnimation from "@/components/lotties/slack-logo.json";
 import configIconAnimation from "@/components/lotties/config-icon.json";
 import developerIconAnimation from "@/components/lotties/developer-icon.json";
 import { CommandPalette } from "@/components/command-palette";
+import { MemberManagementCard } from "@/components/member-management-card";
 import { redirect } from "next/navigation";
 import {
   AlertDialog,
@@ -54,7 +57,17 @@ export default function DashboardPage() {
   const userEmail = user?.email ?? "";
   const userImage = user?.profilePictureUrl ?? "";
 
-  // Fetch workspace config
+  // Get current user's role to check if they're admin
+  const { data: roleData } = useQuery({
+    queryKey: ["currentUserRole"],
+    queryFn: getCurrentUserRole,
+    enabled: !isPending && !!user,
+  });
+
+  const currentUserRole = roleData?.success ? roleData.data?.role : null;
+  const isAdmin = currentUserRole === "admin";
+
+  // Fetch workspace config - only for admins
   const {
     data: workspaceConfigResult,
     isLoading: isInitialLoading,
@@ -62,12 +75,25 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["workspaceConfig"],
     queryFn: getWorkspaceConfig,
-    enabled: !isPending && !!user,
+    enabled: !isPending && !!user && isAdmin,
     select: (result) => result.success ? result.data : null,
   });
 
-  const identityMode: "name-email" | "name-only" =
-    workspaceConfigResult?.shouldShowFullEmail === true ? "name-email" : "name-only";
+  // Sync identity mode from server
+  useEffect(() => {
+    if (workspaceConfigResult?.shouldShowFullEmail !== undefined) {
+      setIdentityModeLocal(workspaceConfigResult.shouldShowFullEmail ? "name-email" : "name-only");
+    }
+  }, [workspaceConfigResult?.shouldShowFullEmail]);
+
+  // Ensure user is added to their workspace's WorkOS organization
+  // This handles users who sign in after the bot is installed
+  const { data: orgCheck } = useQuery({
+    queryKey: ["organizationCheck"],
+    queryFn: ensureUserInOrganization,
+    enabled: !isPending && !!user,
+    retry: false,
+  });
 
   // Sync sendingDomain state with query data
   useEffect(() => {
@@ -87,29 +113,15 @@ export default function DashboardPage() {
     }
   }, [workspaceConfigResult?.channelNamePrefix]);
 
-  // Fetch user config for API key (needed for CommandPalette domains)
-  const {
-    data: workspaceInfoForUserId,
-  } = useQuery({
-    queryKey: ["workspaceInfoForUserId"],
-    queryFn: getSlackWorkspaceInfo,
-    enabled: !isPending && !!user,
-    select: (result) => result.success && result.data ? result.data.userId : null,
-  });
+  // Sync inboundApiKey state with query data
+  useEffect(() => {
+    if (workspaceConfigResult?.inboundApiKey !== undefined) {
+      setInboundApiKeyInput(workspaceConfigResult.inboundApiKey || "");
+    }
+  }, [workspaceConfigResult?.inboundApiKey]);
 
-  const {
-    data: userConfig,
-  } = useQuery({
-    queryKey: ["userConfig", workspaceInfoForUserId],
-    queryFn: async () => {
-      if (!workspaceInfoForUserId) return null;
-      // Import getLocalUserConfig dynamically to avoid circular dependency
-      const { getLocalUserConfig } = await import("@/app/actions/user-config");
-      return await getLocalUserConfig(workspaceInfoForUserId);
-    },
-    enabled: !isPending && !!user && !!workspaceInfoForUserId,
-  });
-  const inboundApiKey = userConfig?.inboundApiKey ?? "";
+  // Get inbound API key from workspace config
+  const inboundApiKey = workspaceConfigResult?.inboundApiKey ?? "";
 
   // Fetch domains for CommandPalette and sending domain dropdown
   const {
@@ -241,6 +253,9 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [sendingDomain, setSendingDomain] = useState<string>("");
   const [channelNamePrefix, setChannelNamePrefix] = useState<string>("");
+  const [inboundApiKeyInput, setInboundApiKeyInput] = useState<string>("");
+  const [identityModeLocal, setIdentityModeLocal] = useState<"name-email" | "name-only">("name-only");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [createRouteInitialStep, setCreateRouteInitialStep] = useState<"root" | "email-address" | "channel-name" | "creating" | undefined>(undefined);
   const [channelSearchQuery, setChannelSearchQuery] = useState<string>("");
@@ -292,53 +307,52 @@ export default function DashboardPage() {
     .slice(0, 2)
     .toUpperCase();
 
-  // Handle radio button change
-  const handleIdentityModeChange = async (value: string) => {
+  // Handle radio button change - just update local state
+  const handleIdentityModeChange = (value: string) => {
     const newMode = value as "name-email" | "name-only";
+    setIdentityModeLocal(newMode);
+    setHasUnsavedChanges(true);
+    setError(null);
+  };
+
+  // Handle sending domain change - just update local state
+  const handleSendingDomainChange = (value: string) => {
+    setSendingDomain(value);
+    setHasUnsavedChanges(true);
+    setError(null);
+  };
+
+  // Handle channel name prefix change - just update local state
+  const handleChannelNamePrefixChange = (value: string) => {
+    setChannelNamePrefix(value);
+    setHasUnsavedChanges(true);
+    setError(null);
+  };
+
+  // Handle inbound API key change - just update local state
+  const handleInboundApiKeyChange = (value: string) => {
+    setInboundApiKeyInput(value);
+    setHasUnsavedChanges(true);
+    setError(null);
+  };
+
+  // Save all configuration changes
+  const handleSaveConfiguration = async () => {
     setError(null);
 
     const result = await updateWorkspaceConfigMutation.mutateAsync({
-      shouldShowFullEmail: newMode === "name-email",
+      shouldShowFullEmail: identityModeLocal === "name-email",
+      sendingDomain: sendingDomain.trim() || null,
+      channelNamePrefix: channelNamePrefix.trim() || null,
+      inboundApiKey: inboundApiKeyInput.trim() || null,
     });
 
-    if (!result.success) {
+    if (result.success) {
+      setHasUnsavedChanges(false);
+    } else {
       setError(result.error || "Failed to save configuration");
     }
   };
-
-  // Handle sending domain change
-  const handleSendingDomainChange = async (value: string) => {
-    setSendingDomain(value);
-    setError(null);
-
-    const result = await updateWorkspaceConfigMutation.mutateAsync({
-      sendingDomain: value.trim() || null,
-    });
-
-    if (!result.success) {
-      setError(result.error || "Failed to save sending domain");
-    }
-  };
-
-  // Handle channel name prefix change - update UI immediately, debounce API call
-  const handleChannelNamePrefixChange = (value: string) => {
-    setChannelNamePrefix(value);
-    setError(null);
-  };
-
-  // Debounce the API call for channel name prefix (only after initialization)
-  useEffect(() => {
-    if (!channelNamePrefixInitializedRef.current) return;
-    if (channelNamePrefix === undefined || channelNamePrefix === "") return;
-    
-    const timeoutId = setTimeout(() => {
-      updateWorkspaceConfigMutation.mutate({
-        channelNamePrefix: channelNamePrefix.trim() || null,
-      });
-    }, 500); // 500ms debounce
-
-    return () => clearTimeout(timeoutId);
-  }, [channelNamePrefix]);
 
   // Extract error message from channels query
   const channelsErrorMessage = channelsError?.error === "bot_not_installed"
@@ -616,6 +630,9 @@ export default function DashboardPage() {
               )}
             </div>
 
+            {/* Member Management Card */}
+            <MemberManagementCard />
+
             {/* Developer Card - Only visible in development */}
             {process.env.NODE_ENV === 'development' && (
             <div className="rounded-lg border border-border bg-background p-6">
@@ -876,7 +893,8 @@ export default function DashboardPage() {
             </div>
             )}
 
-            {/* Workspace Configuration Card */}
+            {/* Workspace Configuration Card - Only visible to admins */}
+            {isAdmin && (
             <div className="rounded-lg border border-border bg-background p-6">
               <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 <span className="h-[1.25em] w-[1.25em]">
@@ -889,14 +907,56 @@ export default function DashboardPage() {
               </p>
               <hr className="my-6 border-border" />
               <div className="space-y-5 w-full">
+                {/* Inbound API key configuration */}
+                <div className="grid-cols-2 gap-2 grid items-start">
+                  <div className="col-span-1">
+                    <label
+                      htmlFor="inbound-api-key"
+                      className="text-sm font-medium text-foreground block mb-1"
+                    >
+                      Inbound.new API key
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Required for email integration. Get your API key from{" "}
+                      <a
+                        href="https://inbound.new/settings/api"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:underline"
+                      >
+                        Inbound.new
+                      </a>
+                    </p>
+                  </div>
+                  <div className="col-span-1">
+                    <Input
+                      id="inbound-api-key"
+                      type="password"
+                      value={inboundApiKeyInput}
+                      onChange={(e) => handleInboundApiKeyChange(e.target.value)}
+                      disabled={updateWorkspaceConfigMutation.isPending || isInitialLoading}
+                      placeholder="Enter your Inbound API key"
+                      className="h-9 text-xs font-mono"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Required for email integration features
+                    </p>
+                  </div>
+                </div>
+
                 {/* Message identity selector */}
                 <div className="grid-cols-2 gap-2 grid items-start">
-                  <span className="text-sm font-medium text-foreground col-span-1">
-                    Message identity
-                  </span>
+                  <div className="col-span-1">
+                    <label className="text-sm font-medium text-foreground block mb-1">
+                      Message identity
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      How your name and email appear in Slack messages. See preview below.
+                    </p>
+                  </div>
                   <div className="col-span-1">
                     <RadioGroup
-                      value={identityMode}
+                      value={identityModeLocal}
                       onValueChange={handleIdentityModeChange}
                       disabled={updateWorkspaceConfigMutation.isPending || isInitialLoading}
                       className="gap-3"
@@ -926,18 +986,47 @@ export default function DashboardPage() {
                         />
                       </div>
                     </RadioGroup>
-                    {updateWorkspaceConfigMutation.isPending ? (
-                      <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
-                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                        Saving...
-                      </p>
-                    ) : error ? (
-                      <p className="mt-1 text-xs text-red-600">{error}</p>
+                  </div>
+                </div>
+
+                {/* Live Slack-style preview */}
+                <div
+                  className={`rounded-lg border border-zinc-200 bg-white p-4 ${lato.className}`}
+                >
+                  <div className="flex items-start gap-3">
+                    {userImage ? (
+                      <img
+                        src={userImage}
+                        alt={userName ? `${userName}'s avatar` : "User avatar"}
+                        className="h-9 w-9 rounded object-cover"
+                      />
                     ) : (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Changes saved automatically.
-                      </p>
+                      <div className="flex h-9 w-9 items-center justify-center rounded bg-zinc-200 text-[10px] font-semibold text-zinc-700">
+                        {fallbackInitials}
+                      </div>
                     )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                        <span className="truncate text-[15px] font-semibold text-zinc-900 gap-x-1 flex items-center">
+                          <span>{userName || "Your Name"}</span>
+                          {identityModeLocal === "name-email" && (
+                            <>
+                              <span>
+                                &lt;{userEmail || "you@example.com"}&gt;
+                              </span>
+                            </>
+                          )}
+                        </span>
+                        <span className="text-[12px] text-zinc-400">now</span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap text-[15px] leading-6 text-zinc-800">
+                        This is a preview of how your messages will appear in
+                        Slack.
+                        {"\n"}
+                        Reply inline, attach files, and keep email threads in
+                        sync.
+                      </p>
+                    </div>
                   </div>
                 </div>
 
@@ -987,12 +1076,6 @@ export default function DashboardPage() {
                         </SelectContent>
                       </Select>
                     )}
-                    {updateWorkspaceConfigMutation.isPending ? (
-                      <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
-                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                        Saving...
-                      </p>
-                    ) : null}
                   </div>
                 </div>
 
@@ -1017,63 +1100,46 @@ export default function DashboardPage() {
                       onChange={(e) => handleChannelNamePrefixChange(e.target.value)}
                       disabled={updateWorkspaceConfigMutation.isPending || isInitialLoading}
                       placeholder="ext-inbd-*"
-                      className="w-full font-mono text-sm"
+                      className="h-9 text-xs font-mono"
                     />
-                    {updateWorkspaceConfigMutation.isPending ? (
-                      <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
-                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                        Saving...
-                      </p>
-                    ) : (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Example: Creating "support" with prefix "ext-inbd-*" results in "ext-inbd-support"
-                      </p>
-                    )}
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Example: Creating "support" with prefix "ext-inbd-*" results in "ext-inbd-support"
+                    </p>
                   </div>
                 </div>
 
-                {/* Live Slack-style preview */}
-                <div
-                  className={`rounded-lg border border-zinc-200 bg-white p-4 ${lato.className}`}
-                >
-                  <div className="flex items-start gap-3">
-                    {userImage ? (
-                      <img
-                        src={userImage}
-                        alt={userName ? `${userName}'s avatar` : "User avatar"}
-                        className="h-9 w-9 rounded object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-9 w-9 items-center justify-center rounded bg-zinc-200 text-[10px] font-semibold text-zinc-700">
-                        {fallbackInitials}
-                      </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                        <span className="truncate text-[15px] font-semibold text-zinc-900 gap-x-1 flex items-center">
-                          <span>{userName || "Your Name"}</span>
-                          {identityMode === "name-email" && (
-                            <>
-                              <span>
-                                &lt;{userEmail || "you@example.com"}&gt;
-                              </span>
-                            </>
-                          )}
-                        </span>
-                        <span className="text-[12px] text-zinc-400">now</span>
-                      </div>
-                      <p className="mt-1 whitespace-pre-wrap text-[15px] leading-6 text-zinc-800">
-                        This is a preview of how your messages will appear in
-                        Slack.
-                        {"\n"}
-                        Reply inline, attach files, and keep email threads in
-                        sync.
-                      </p>
-                    </div>
-                  </div>
+                {/* Save button */}
+                <div className="flex items-center justify-end gap-3 pt-4">
+                  {error && (
+                    <p className="text-xs text-red-600">{error}</p>
+                  )}
+                  {updateWorkspaceConfigMutation.isPending ? (
+                    <button
+                      disabled
+                      className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground opacity-50 cursor-not-allowed flex items-center gap-2"
+                    >
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                      Saving...
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSaveConfiguration}
+                      disabled={!hasUnsavedChanges}
+                      className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                        hasUnsavedChanges
+                          ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                          : "bg-muted text-muted-foreground cursor-not-allowed"
+                      }`}
+                    >
+                      Save Changes
+                    </button>
+                  )}
                 </div>
+
+                
               </div>
             </div>
+            )}
           </div>
         )}
         <CommandPalette

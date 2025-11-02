@@ -24,25 +24,27 @@ export default eventHandler(async (event) => {
 			.where(eq(workspaceConfig.teamId, teamId))
 			.limit(1);
 
-		if (config.length === 0) {
-			return {
-				success: true,
-				data: {
-					shouldShowFullEmail: false,
-					sendingDomain: null,
-					channelNamePrefix: 'ext-inbd-*',
-				},
-			};
-		}
-
+	if (config.length === 0) {
 		return {
 			success: true,
 			data: {
-				shouldShowFullEmail: config[0].shouldShowFullEmail ?? false,
-				sendingDomain: config[0].sendingDomain ?? null,
-				channelNamePrefix: config[0].channelNamePrefix ?? 'ext-inbd-*',
+				shouldShowFullEmail: false,
+				sendingDomain: null,
+				channelNamePrefix: 'ext-inbd-*',
+				inboundApiKey: null,
 			},
 		};
+	}
+
+	return {
+		success: true,
+		data: {
+			shouldShowFullEmail: config[0].shouldShowFullEmail ?? false,
+			sendingDomain: config[0].sendingDomain ?? null,
+			channelNamePrefix: config[0].channelNamePrefix ?? 'ext-inbd-*',
+			inboundApiKey: config[0].inboundApiKey ?? null,
+		},
+	};
 	} catch (error) {
 		console.error("Error fetching workspace config:", error);
 		return {

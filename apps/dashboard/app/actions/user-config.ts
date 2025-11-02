@@ -8,6 +8,8 @@ import { userConfig, workspaceConfig, emailRoutes, workspaceInstallations } from
 import { withAuth } from "@/lib/workos-auth";
 import { WebClient } from "@slack/web-api";
 import { createDecipheriv, scryptSync } from 'node:crypto';
+import { getOrganizationByTeamId, addUserToOrganization } from "@/lib/workos-organizations";
+import { workos } from "@/lib/workos-client";
 
 // Encryption utilities for decrypting bot tokens
 const ALGORITHM = 'aes-256-gcm';
@@ -41,6 +43,25 @@ function decrypt(encryptedText: string): string {
   let decrypted = decipher.update(encrypted, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return decrypted;
+}
+
+/**
+ * Get workspace's inbound API key
+ */
+async function getWorkspaceInboundApiKey(teamId: string): Promise<string | null> {
+  try {
+    const db = getDb();
+    const config = await db
+      .select()
+      .from(workspaceConfig)
+      .where(eq(workspaceConfig.teamId, teamId))
+      .limit(1);
+    
+    return config[0]?.inboundApiKey || null;
+  } catch (error) {
+    console.error("Error getting workspace inbound API key:", error);
+    return null;
+  }
 }
 
 /**
@@ -169,23 +190,8 @@ export async function createEmailAddress(emailAddress: string) {
     
     const teamId = workspaceInfo.data.teamId;
     
-    // Get inbound API key from user config
-    const slackUserId = await getSlackUserId();
-    if (!slackUserId) {
-      return {
-        success: false,
-        error: "Slack user ID not found",
-      };
-    }
-    
-    const db = getDb();
-    const userConfigResult = await db
-      .select()
-      .from(userConfig)
-      .where(eq(userConfig.userId, slackUserId))
-      .limit(1);
-    
-    const inboundApiKey = userConfigResult[0]?.inboundApiKey;
+    // Get inbound API key from workspace config
+    const inboundApiKey = await getWorkspaceInboundApiKey(teamId);
     if (!inboundApiKey) {
       return {
         success: false,
@@ -426,29 +432,18 @@ export async function deleteEmailRoute(emailAddress: string) {
       };
     }
     
-    // Get inbound API key from user config
-    const slackUserId = await getSlackUserId();
-    if (!slackUserId) {
-      return {
-        success: false,
-        error: "Slack user ID not found",
-      };
-    }
+    const teamId = workspaceInfo.data.teamId;
     
-    const db = getDb();
-    const userConfigResult = await db
-      .select()
-      .from(userConfig)
-      .where(eq(userConfig.userId, slackUserId))
-      .limit(1);
-    
-    const inboundApiKey = userConfigResult[0]?.inboundApiKey;
+    // Get inbound API key from workspace config
+    const inboundApiKey = await getWorkspaceInboundApiKey(teamId);
     if (!inboundApiKey) {
       return {
         success: false,
         error: "Inbound API key not found. Please configure your API key first.",
       };
     }
+    
+    const db = getDb();
     
     // Get email address ID from Inbound API
     const emailResponse = await fetch(`https://inbound.new/api/v2/email-addresses?address=${encodeURIComponent(emailAddress)}`, {
@@ -639,6 +634,50 @@ export async function getSlackWorkspaceInfo() {
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to get workspace info",
+    };
+  }
+}
+
+/**
+ * Ensure the authenticated user belongs to their workspace's organization
+ * Called on dashboard load to handle users who sign in after bot is installed
+ * 
+ * This enables User B to automatically join the organization that User A created
+ * when they installed the bot.
+ */
+export async function ensureUserInOrganization() {
+  try {
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated" };
+    }
+
+    // Get workspace info to find team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return { success: false, error: "no_workspace" };
+    }
+
+    const teamId = workspaceInfo.data.teamId;
+
+    // Check if organization exists for this workspace
+    const org = await getOrganizationByTeamId(teamId);
+    
+    if (!org) {
+      // Organization doesn't exist - user needs to install bot first
+      return { success: false, error: "bot_not_installed" };
+    }
+    
+    // Add user to organization if not already a member
+    await addUserToOrganization(user.id, org.id);
+    
+    console.log(`[WorkOS] User ${user.id} ensured in organization ${org.id}`);
+    return { success: true, organizationId: org.id };
+  } catch (error) {
+    console.error("Error ensuring user in organization:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to ensure user in organization",
     };
   }
 }
@@ -893,12 +932,12 @@ export async function fetchInboundDomains(inboundApiKey: string) {
 }
 
 /**
- * Update user configuration - saves to both API server and local database
+ * @deprecated This function is deprecated. Use updateWorkspaceConfig instead.
+ * All configuration is now stored at the workspace level.
  */
 export async function updateUserConfig(config: {
   shouldShowFullEmail?: boolean;
   sendingDomain?: string;
-  inboundApiKey?: string;
 }) {
   try {
     const slackUserId = await getSlackUserId();
@@ -909,46 +948,7 @@ export async function updateUserConfig(config: {
       };
     }
 
-    // If sendingDomain is being updated, verify the user owns it
-    if (config.sendingDomain) {
-      const db = getDb();
-      const localConfig = await db
-        .select()
-        .from(userConfig)
-        .where(eq(userConfig.userId, slackUserId))
-        .limit(1);
-
-      const apiKey = localConfig[0]?.inboundApiKey;
-      if (!apiKey) {
-        return {
-          success: false,
-          error: "Inbound API key not found. Please configure your API key first.",
-        };
-      }
-
-      // Verify the domain belongs to the user's account
-      const domainsResult = await fetchInboundDomains(apiKey);
-      if (!domainsResult.success || !domainsResult.data) {
-        return {
-          success: false,
-          error: "Failed to verify domain ownership",
-        };
-      }
-
-      const domainExists = domainsResult.data.some(
-        (domain: { domain: string; status: string; canReceiveEmails: boolean }) =>
-          domain.domain === config.sendingDomain &&
-          domain.status === "verified" &&
-          domain.canReceiveEmails === true
-      );
-
-      if (!domainExists) {
-        return {
-          success: false,
-          error: "Domain not found or not verified in your Inbound.new account",
-        };
-      }
-    }
+    // Domain verification is now handled at workspace level
 
     const backendUrl = process.env.BACKEND_API_URL || "http://localhost:3668";
 
@@ -990,18 +990,16 @@ export async function updateUserConfig(config: {
       .where(eq(userConfig.userId, slackUserId))
       .limit(1);
 
-    // Handle inboundApiKey update (only stored locally, not synced to API server)
+    // Update local database with API server response
     const updateData: {
       sendingDomain?: string;
       shouldShowFullEmail?: boolean;
-      inboundApiKey?: string;
       updatedAt: Date;
     } = {
       updatedAt: new Date(),
     };
 
     // Use config values if provided, otherwise fall back to API response
-    // Only include fields that are defined (omit null/undefined values)
     if (config.sendingDomain !== undefined && config.sendingDomain !== null) {
       updateData.sendingDomain = config.sendingDomain;
     } else if (updatedConfig.sendingDomain !== undefined && updatedConfig.sendingDomain !== null) {
@@ -1013,17 +1011,12 @@ export async function updateUserConfig(config: {
     } else if (updatedConfig.shouldShowFullEmail !== undefined) {
       updateData.shouldShowFullEmail = updatedConfig.shouldShowFullEmail ?? false;
     }
-    
-    if (config.inboundApiKey !== undefined && config.inboundApiKey !== null) {
-      updateData.inboundApiKey = config.inboundApiKey;
-    }
 
     if (existingConfig.length === 0) {
       await db.insert(userConfig).values({
         userId: slackUserId,
         sendingDomain: config.sendingDomain || updatedConfig.sendingDomain || undefined,
         shouldShowFullEmail: config.shouldShowFullEmail ?? updatedConfig.shouldShowFullEmail ?? false,
-        inboundApiKey: config.inboundApiKey || undefined,
         updatedAt: new Date(),
       });
     } else {
@@ -1086,15 +1079,11 @@ export async function getCurrentUserConfig() {
         .where(eq(userConfig.userId, slackUserId))
         .limit(1);
 
-      // Get existing local config to preserve inboundApiKey
-      const localConfig = await getLocalUserConfig(slackUserId);
-      
       if (existingConfig.length === 0) {
         await db.insert(userConfig).values({
           userId: slackUserId,
           sendingDomain: apiConfig.sendingDomain || null,
           shouldShowFullEmail: apiConfig.shouldShowFullEmail ?? false,
-          inboundApiKey: localConfig?.inboundApiKey || null,
           updatedAt: new Date(),
         });
       } else {
@@ -1103,14 +1092,12 @@ export async function getCurrentUserConfig() {
           .set({
             sendingDomain: apiConfig.sendingDomain || null,
             shouldShowFullEmail: apiConfig.shouldShowFullEmail ?? false,
-            // Preserve inboundApiKey if it exists locally
-            inboundApiKey: localConfig?.inboundApiKey || existingConfig[0].inboundApiKey || null,
             updatedAt: new Date(),
           })
           .where(eq(userConfig.userId, slackUserId));
       }
 
-      // Return the local config (which includes inboundApiKey) after syncing
+      // Return the local config after syncing
       return await getLocalUserConfig(slackUserId);
     }
 
@@ -1176,8 +1163,25 @@ export async function updateWorkspaceConfig(config: {
   shouldShowFullEmail?: boolean;
   sendingDomain?: string | null;
   channelNamePrefix?: string | null;
+  inboundApiKey?: string | null;
 }) {
   try {
+    // Check if user is admin
+    const roleCheck = await getCurrentUserRole();
+    if (!roleCheck.success || !roleCheck.data) {
+      return {
+        success: false,
+        error: "Permission denied. Unable to verify role.",
+      };
+    }
+
+    if (roleCheck.data.role !== 'admin') {
+      return {
+        success: false,
+        error: "Only administrators can update workspace configuration.",
+      };
+    }
+
     const workspaceInfo = await getSlackWorkspaceInfo();
     
     if (!workspaceInfo.success || !workspaceInfo.data) {
@@ -1188,6 +1192,41 @@ export async function updateWorkspaceConfig(config: {
     }
     
     const teamId = workspaceInfo.data.teamId;
+    
+    // If sendingDomain is being updated, verify it exists in Inbound.new
+    if (config.sendingDomain) {
+      const apiKey = await getWorkspaceInboundApiKey(teamId);
+      if (!apiKey) {
+        return {
+          success: false,
+          error: "Inbound API key not found. Please configure your API key first.",
+        };
+      }
+      
+      // Verify the domain belongs to the workspace's Inbound.new account
+      const domainsResult = await fetchInboundDomains(apiKey);
+      if (!domainsResult.success || !domainsResult.data) {
+        return {
+          success: false,
+          error: "Failed to verify domain ownership",
+        };
+      }
+      
+      const domainExists = domainsResult.data.some(
+        (domain: { domain: string; status: string; canReceiveEmails: boolean }) =>
+          domain.domain === config.sendingDomain &&
+          domain.status === "verified" &&
+          domain.canReceiveEmails === true
+      );
+      
+      if (!domainExists) {
+        return {
+          success: false,
+          error: "Domain not found or not verified in your Inbound.new account",
+        };
+      }
+    }
+    
     const backendUrl = process.env.BACKEND_API_URL || "http://localhost:3668";
     
     const response = await fetch(`${backendUrl}/api/workspace/${teamId}/config`, {
@@ -1218,48 +1257,286 @@ export async function updateWorkspaceConfig(config: {
   }
 }
 
+/**
+ * @deprecated This function is deprecated. Use updateWorkspaceConfig with inboundApiKey instead.
+ * Inbound API key is now stored at the workspace level, not user level.
+ */
 export async function updateInboundApiKey(inboundApiKey: string) {
+  console.warn("updateInboundApiKey is deprecated. Use updateWorkspaceConfig with inboundApiKey instead.");
+  return {
+    success: false,
+    error: "This function is deprecated. Inbound API key is now configured at workspace level.",
+  };
+}
+
+/**
+ * Get current user's role in their organization
+ */
+export async function getCurrentUserRole() {
   try {
-    const slackUserId = await getSlackUserId();
-    if (!slackUserId) {
-      return {
-        success: false,
-        error: "Slack user ID not found",
-      };
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated" };
     }
 
+    // Get workspace info to find team_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return { success: false, error: "no_workspace" };
+    }
+
+    const teamId = workspaceInfo.data.teamId;
+
+    // Get organization
+    const org = await getOrganizationByTeamId(teamId);
+    if (!org) {
+      return { success: false, error: "bot_not_installed" };
+    }
+
+    // Get user's membership
+    const memberships = await workos.userManagement.listOrganizationMemberships({
+      userId: user.id,
+      organizationId: org.id,
+    });
+
+    if (memberships.data.length === 0) {
+      return { success: false, error: "not_member" };
+    }
+
+    const membership = memberships.data[0];
+    
+    // Check if user is the owner (bot installer)
     const db = getDb();
-    const existingConfig = await db
+    const workspace = await db
       .select()
-      .from(userConfig)
-      .where(eq(userConfig.userId, slackUserId))
+      .from(workspaceInstallations)
+      .where(eq(workspaceInstallations.teamId, teamId))
       .limit(1);
 
-    if (existingConfig.length === 0) {
-      await db.insert(userConfig).values({
-        userId: slackUserId,
-        inboundApiKey,
-        shouldShowFullEmail: false,
-        updatedAt: new Date(),
-      });
-    } else {
-      await db
-        .update(userConfig)
-        .set({
-          inboundApiKey,
-          updatedAt: new Date(),
-        })
-        .where(eq(userConfig.userId, slackUserId));
-    }
+    const isOwner = workspace.length > 0 && workspace[0].installedBy === user.id;
 
     return {
       success: true,
+      data: {
+        role: membership.role?.slug || 'member',
+        isOwner,
+        membershipId: membership.id,
+      },
     };
   } catch (error) {
-    console.error("Error updating inbound API key:", error);
+    console.error("Error getting current user role:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to update API key",
+      error: error instanceof Error ? error.message : "Failed to get user role",
+    };
+  }
+}
+
+/**
+ * List all members of the current user's organization
+ * Only admins can see all members
+ */
+export async function listOrganizationMembers() {
+  try {
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated" };
+    }
+
+    // Get workspace info
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return { success: false, error: "no_workspace" };
+    }
+
+    const teamId = workspaceInfo.data.teamId;
+
+    // Get organization
+    const org = await getOrganizationByTeamId(teamId);
+    if (!org) {
+      return { success: false, error: "bot_not_installed" };
+    }
+
+    // Check user's role
+    const roleCheck = await getCurrentUserRole();
+    if (!roleCheck.success || !roleCheck.data) {
+      return { success: false, error: "permission_denied" };
+    }
+
+    // Only admins can list all members
+    if (roleCheck.data.role !== 'admin') {
+      return { success: false, error: "admin_only" };
+    }
+
+    // Get all members
+    const memberships = await workos.userManagement.listOrganizationMemberships({
+      organizationId: org.id,
+    });
+
+    // Get workspace owner
+    const db = getDb();
+    const workspace = await db
+      .select()
+      .from(workspaceInstallations)
+      .where(eq(workspaceInstallations.teamId, teamId))
+      .limit(1);
+
+    const ownerId = workspace.length > 0 ? workspace[0].installedBy : null;
+
+    // Fetch user details for each member
+    const members = await Promise.all(
+      memberships.data.map(async (membership) => {
+        try {
+          const userDetails = await workos.userManagement.getUser(membership.userId);
+          return {
+            id: membership.id,
+            userId: membership.userId,
+            email: userDetails.email,
+            firstName: userDetails.firstName || '',
+            lastName: userDetails.lastName || '',
+            profilePictureUrl: userDetails.profilePictureUrl || null,
+            role: membership.role?.slug || 'member',
+            status: membership.status,
+            isOwner: membership.userId === ownerId,
+            createdAt: membership.createdAt,
+          };
+        } catch (error) {
+          console.error(`Error fetching user ${membership.userId}:`, error);
+          return null;
+        }
+      })
+    );
+
+    return {
+      success: true,
+      data: members.filter((m) => m !== null),
+    };
+  } catch (error) {
+    console.error("Error listing organization members:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to list members",
+    };
+  }
+}
+
+/**
+ * Update a member's role
+ * Only admins can update roles, and owner cannot be demoted
+ */
+export async function updateMemberRole(membershipId: string, newRole: 'admin' | 'member') {
+  try {
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated" };
+    }
+
+    // Check if current user is admin
+    const roleCheck = await getCurrentUserRole();
+    if (!roleCheck.success || !roleCheck.data) {
+      return { success: false, error: "permission_denied" };
+    }
+
+    if (roleCheck.data.role !== 'admin') {
+      return { success: false, error: "admin_only" };
+    }
+
+    // Get the membership being updated
+    const membership = await workos.userManagement.getOrganizationMembership(membershipId);
+
+    // Check if target user is the owner
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return { success: false, error: "no_workspace" };
+    }
+
+    const db = getDb();
+    const workspace = await db
+      .select()
+      .from(workspaceInstallations)
+      .where(eq(workspaceInstallations.teamId, workspaceInfo.data.teamId))
+      .limit(1);
+
+    const isOwner = workspace.length > 0 && workspace[0].installedBy === membership.userId;
+
+    // Owners cannot be demoted
+    if (isOwner && newRole === 'member') {
+      return { success: false, error: "cannot_demote_owner" };
+    }
+
+    // Update the role
+    await workos.userManagement.updateOrganizationMembership(membershipId, {
+      roleSlug: newRole,
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error("Error updating member role:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to update role",
+    };
+  }
+}
+
+/**
+ * Remove a member from the organization
+ * Only admins can remove members, and owner cannot be removed
+ */
+export async function removeMember(membershipId: string) {
+  try {
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated" };
+    }
+
+    // Check if current user is admin
+    const roleCheck = await getCurrentUserRole();
+    if (!roleCheck.success || !roleCheck.data) {
+      return { success: false, error: "permission_denied" };
+    }
+
+    if (roleCheck.data.role !== 'admin') {
+      return { success: false, error: "admin_only" };
+    }
+
+    // Get the membership being removed
+    const membership = await workos.userManagement.getOrganizationMembership(membershipId);
+
+    // Prevent removing self
+    if (membership.userId === user.id) {
+      return { success: false, error: "cannot_remove_self" };
+    }
+
+    // Check if target user is the owner
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return { success: false, error: "no_workspace" };
+    }
+
+    const db = getDb();
+    const workspace = await db
+      .select()
+      .from(workspaceInstallations)
+      .where(eq(workspaceInstallations.teamId, workspaceInfo.data.teamId))
+      .limit(1);
+
+    const isOwner = workspace.length > 0 && workspace[0].installedBy === membership.userId;
+
+    // Owners cannot be removed
+    if (isOwner) {
+      return { success: false, error: "cannot_remove_owner" };
+    }
+
+    // Remove the member
+    await workos.userManagement.deleteOrganizationMembership(membershipId);
+
+    return { success: true };
+  } catch (error) {
+    console.error("Error removing member:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to remove member",
     };
   }
 }

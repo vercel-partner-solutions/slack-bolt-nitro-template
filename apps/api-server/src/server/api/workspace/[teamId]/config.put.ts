@@ -8,6 +8,7 @@ interface UpdateConfigBody {
 	shouldShowFullEmail?: boolean;
 	sendingDomain?: string | null;
 	channelNamePrefix?: string | null;
+	inboundApiKey?: string | null;
 }
 
 export default eventHandler(async (event) => {
@@ -25,7 +26,7 @@ export default eventHandler(async (event) => {
 	try {
 		const body = await readBody<UpdateConfigBody>(event);
 
-		if (body.shouldShowFullEmail === undefined && body.sendingDomain === undefined && body.channelNamePrefix === undefined) {
+		if (body.shouldShowFullEmail === undefined && body.sendingDomain === undefined && body.channelNamePrefix === undefined && body.inboundApiKey === undefined) {
 			return {
 				success: false,
 				error: "At least one field is required",
@@ -47,6 +48,7 @@ export default eventHandler(async (event) => {
 				shouldShowFullEmail?: boolean;
 				sendingDomain?: string | null;
 				channelNamePrefix?: string | null;
+				inboundApiKey?: string | null;
 				emailIntegrationEnabled: boolean;
 				updatedAt: Date;
 			} = {
@@ -67,6 +69,10 @@ export default eventHandler(async (event) => {
 				values.channelNamePrefix = body.channelNamePrefix;
 			}
 			
+			if (body.inboundApiKey !== undefined) {
+				values.inboundApiKey = body.inboundApiKey;
+			}
+			
 			result = await db
 				.insert(workspaceConfig)
 				.values(values)
@@ -77,6 +83,7 @@ export default eventHandler(async (event) => {
 				shouldShowFullEmail?: boolean;
 				sendingDomain?: string | null;
 				channelNamePrefix?: string | null;
+				inboundApiKey?: string | null;
 				updatedAt: Date;
 			} = {
 				updatedAt: new Date(),
@@ -92,6 +99,10 @@ export default eventHandler(async (event) => {
 			
 			if (body.channelNamePrefix !== undefined) {
 				updateValues.channelNamePrefix = body.channelNamePrefix;
+			}
+			
+			if (body.inboundApiKey !== undefined) {
+				updateValues.inboundApiKey = body.inboundApiKey;
 			}
 			
 			result = await db

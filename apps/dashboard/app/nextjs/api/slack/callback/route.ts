@@ -4,6 +4,7 @@ import { getDb } from "@/db";
 import { workspaceInstallations, workspaceConfig } from "@slackbound/db";
 import { eq } from "drizzle-orm";
 import { createCipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { getOrCreateOrganization, addUserToOrganization } from "@/lib/workos-organizations";
 
 // Encryption utilities (copied from api-server for now)
 const ALGORITHM = 'aes-256-gcm';
@@ -121,6 +122,14 @@ export async function GET(request: Request) {
     // Encrypt bot token
     const encryptedToken = encrypt(botAccessToken);
 
+    // Get or create WorkOS organization for this Slack workspace
+    console.log(`[WorkOS] Getting or creating organization for team ${teamId}: ${teamName}`);
+    const workosOrg = await getOrCreateOrganization(teamId, teamName);
+    
+    // Add authenticated user to the organization as Admin (bot installer is always admin)
+    console.log(`[WorkOS] Adding user ${user.id} to organization ${workosOrg.id} as admin`);
+    await addUserToOrganization(user.id, workosOrg.id, 'admin');
+
     const db = getDb();
 
     // Check if workspace already installed
@@ -145,6 +154,7 @@ export async function GET(request: Request) {
           botAccessToken: encryptedToken,
           scopes,
           enterpriseId: enterpriseId || null,
+          workosOrganizationId: workosOrg.id,
           isActive: true,
           uninstalledAt: null,
           updatedAt: now,
@@ -159,6 +169,7 @@ export async function GET(request: Request) {
         enterpriseId: enterpriseId || null,
         teamName,
         teamUrl: teamUrl || null,
+        workosOrganizationId: workosOrg.id,
         botUserId,
         botAccessToken: encryptedToken,
         botRefreshToken: null,
