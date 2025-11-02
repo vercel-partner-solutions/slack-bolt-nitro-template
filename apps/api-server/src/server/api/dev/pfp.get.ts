@@ -1,12 +1,22 @@
-import { eventHandler } from 'h3';
+import { eventHandler, createError } from 'h3';
 import { app } from '../../../bolt/app';
 import { getInboundEmailChannelId } from '../../../bolt/utils/config';
 
 /**
  * Test endpoint to verify chat:write.customize scope is working
  * GET /api/dev/pfp
+ * 
+ * SECURITY: Only available in development environment
  */
-export default eventHandler(async () => {
+export default eventHandler(async (event) => {
+  // Only allow in development environment
+  if (process.env.NODE_ENV === 'production' || !process.env.NODE_ENV || process.env.NODE_ENV === 'test') {
+    throw createError({
+      statusCode: 404,
+      statusMessage: 'Not Found',
+    });
+  }
+
   try {
     const channelId = getInboundEmailChannelId();
 

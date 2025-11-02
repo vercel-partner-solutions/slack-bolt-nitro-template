@@ -47,6 +47,8 @@ interface ThreadStorage {
   markSlackMessageProcessed(messageTs: string): Promise<void>;
   hasProcessedSlackMessage(messageTs: string): Promise<boolean>;
   checkAndMarkSlackMessageProcessed(messageTs: string): Promise<boolean>;
+  setEmailWorkspace(emailId: string, teamId: string): Promise<void>;
+  getEmailWorkspace(emailId: string): Promise<string | null>;
 }
 
 // In-memory storage (not persistent across restarts)
@@ -59,6 +61,7 @@ class InMemoryThreadStorage implements ThreadStorage {
   private processedEmailFingerprints = new Set<string>();
   private sentByUs = new Set<string>(); // Track emails we sent (by Message-ID or fingerprint)
   private processedSlackMessages = new Set<string>();
+  private emailToWorkspace = new Map<string, string>(); // Map email ID to team ID
 
   async set(inboundThreadId: string, slackThreadTs: string, emailId: string, channelId: string): Promise<void> {
     this.inboundToSlack.set(inboundThreadId, { slackThreadTs, emailId, channelId });
@@ -155,6 +158,14 @@ class InMemoryThreadStorage implements ThreadStorage {
     }
     this.processedSlackMessages.add(messageTs);
     return false; // First time processing
+  }
+
+  async setEmailWorkspace(emailId: string, teamId: string): Promise<void> {
+    this.emailToWorkspace.set(emailId, teamId);
+  }
+
+  async getEmailWorkspace(emailId: string): Promise<string | null> {
+    return this.emailToWorkspace.get(emailId) || null;
   }
 }
 
@@ -290,6 +301,16 @@ class RedisThreadStorage implements ThreadStorage {
     // Use Redis SETNX (SET if Not eXists) for atomic check-and-set
     const result = await this.redis.setnx(`slackmsg:${messageTs}`, '1');
     return result === 0; // Returns 0 if key already existed (already processed)
+  }
+
+  async setEmailWorkspace(emailId: string, teamId: string): Promise<void> {
+    // Store with 90 day expiration (attachments may be accessed for a while)
+    await this.redis.set(`email:workspace:${emailId}`, teamId);
+    await this.redis.expire(`email:workspace:${emailId}`, 7776000); // 90 days
+  }
+
+  async getEmailWorkspace(emailId: string): Promise<string | null> {
+    return await this.redis.get<string>(`email:workspace:${emailId}`);
   }
 }
 

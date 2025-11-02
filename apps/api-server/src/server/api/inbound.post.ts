@@ -1,5 +1,6 @@
 import type { InboundWebhookPayload } from '@inboundemail/sdk';
-import { eventHandler, readBody } from 'h3';
+import { Inbound, verifyWebhookFromHeaders } from '@inboundemail/sdk';
+import { eventHandler, readBody, createError } from 'h3';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -69,6 +70,23 @@ export default eventHandler(async (event) => {
   console.log('[INBOUND] 📬 Received webhook request');
 
   try {
+    // Verify webhook authenticity using Inbound.new SDK
+    const inbound = new Inbound(getInboundApiKey());
+    const isValid = await verifyWebhookFromHeaders(event.node.req.headers as unknown as Headers, inbound);
+    
+    if (!isValid) {
+      console.warn('[INBOUND] ⚠️  Webhook verification failed', {
+        endpointId: event.node.req.headers['x-endpoint-id'],
+        timestamp: new Date().toISOString(),
+      });
+      throw createError({
+        statusCode: 401,
+        statusMessage: 'Unauthorized - Invalid webhook verification',
+      });
+    }
+    
+    console.log('[INBOUND] ✅ Webhook verified successfully');
+
     const payload: InboundWebhookPayload = await readBody(event);
 
     // Save payload to file in LOCAL_DEV mode for replay testing
@@ -527,6 +545,9 @@ export default eventHandler(async (event) => {
         });
 
         console.log(`[INBOUND] ✅ Posted to workspace ${route.teamId} successfully! Message TS: ${response.ts}`);
+        
+        // Store email ID -> team ID mapping for attachment authorization
+        await threadStorage.setEmailWorkspace(email.id, route.teamId);
         
         responses.push({
           teamId: route.teamId,

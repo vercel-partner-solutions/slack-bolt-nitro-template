@@ -404,10 +404,26 @@ export const emailThreadReply = async ({
               });
 
               if (domainsResponse.ok) {
-                const domainsData = (await domainsResponse.json()) as { data?: Array<{ domain: string; id: string }> };
+                const domainsData = (await domainsResponse.json()) as { 
+                  data?: Array<{ 
+                    domain: string; 
+                    id: string; 
+                    status: string; 
+                    canReceiveEmails: boolean;
+                  }> 
+                };
                 const domainInfo = domainsData.data?.find((d: { domain: string }) => d.domain === domain);
 
+                // SECURITY: Verify domain ownership - must be verified and able to receive emails
                 if (domainInfo?.id) {
+                  if (domainInfo.status !== 'verified' || !domainInfo.canReceiveEmails) {
+                    logger.warn(
+                      `Cannot auto-create email route for ${senderEmailAddress}: ` +
+                      `Domain ${domain} is not verified (status: ${domainInfo.status}, canReceiveEmails: ${domainInfo.canReceiveEmails})`
+                    );
+                    // Don't auto-create if domain is not properly configured - continue with email send
+                  } else {
+
                   // Create email address in Inbound.new
                   const emailResponse = await fetch('https://inbound.new/api/v2/email-addresses', {
                     method: 'POST',
@@ -432,16 +448,21 @@ export const emailThreadReply = async ({
                       isActive: true,
                     });
 
-                    logger.info(`✅ Auto-created email route for ${senderEmailAddress}`);
+                    logger.info(`✅ Auto-created email route for ${senderEmailAddress} (verified domain: ${domain})`);
                   } else {
                     const errorData = (await emailResponse.json().catch(() => ({}))) as { error?: string };
                     logger.warn(`Failed to create email address in Inbound.new: ${errorData.error || emailResponse.statusText}`);
                   }
+                  }
                 } else {
-                  logger.warn(`Domain ${domain} not found in Inbound.new account`);
+                  logger.warn(
+                    `Cannot auto-create email route for ${senderEmailAddress}: ` +
+                    `Domain ${domain} not found in Inbound.new account. ` +
+                    `User must manually configure email routes for this domain.`
+                  );
                 }
               } else {
-                logger.warn('Failed to fetch domains from Inbound.new');
+                logger.warn('Failed to fetch domains from Inbound.new - cannot verify domain ownership');
               }
             }
           }

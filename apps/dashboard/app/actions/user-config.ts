@@ -788,23 +788,22 @@ export async function createSlackChannel(channelName: string, isPrivate: boolean
 
 /**
  * Fetch user configuration from the API server
+ * Uses internal API client with proper authentication
  */
 export async function fetchUserConfig(slackUserId: string) {
   try {
-    const backendUrl = process.env.BACKEND_API_URL || "http://localhost:3668";
-    const response = await fetch(`${backendUrl}/api/user-config/${slackUserId}`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
+    const { apiClient } = await import("@/lib/api-client");
+    const result = await apiClient<{
+      success: boolean;
+      data?: {
+        userId: string;
+        sendingDomain: string | null;
+        shouldShowFullEmail: boolean;
+      };
+      error?: string;
+    }>(`/api/user-config/${slackUserId}`);
 
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = await response.json();
-    return data.success ? data.data : null;
+    return result.success && result.data ? result.data : null;
   } catch (error) {
     console.error("Error fetching user config:", error);
     return null;
