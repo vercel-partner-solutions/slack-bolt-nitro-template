@@ -1,9 +1,15 @@
-import { createAuthClient } from "better-auth/react";
-import { genericOAuthClient } from "better-auth/client/plugins";
+"use client";
 
-export const authClient = createAuthClient({
-  baseURL: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-  plugins: [genericOAuthClient()],
-});
+import { useAuth as workosUseAuth } from '@workos-inc/authkit-nextjs/components';
+import { signOut as workosSignOut } from '@workos-inc/authkit-nextjs';
 
-export const { signIn, signOut, signUp, useSession } = authClient;
+/**
+ * Client-side hook to access the current user session
+ * Returns { user, isLoading } where user contains WorkOS user data
+ */
+export const useAuth = workosUseAuth;
+
+/**
+ * Sign out the current user from the client
+ */
+export const signOut = workosSignOut;

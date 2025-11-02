@@ -1,20 +1,16 @@
 import { NextResponse } from "next/server";
-import { headers } from "next/headers";
-import { getAuth } from "@/lib/auth";
+import { withAuth } from "@/lib/workos-auth";
 
 /**
  * Initiate Slack OAuth flow for bot installation
  */
 export async function GET() {
   try {
-    // Check if user is authenticated
-    const auth = getAuth();
-    const session = await auth.api.getSession({
-      headers: await headers(),
-    });
+    // Check if user is authenticated with WorkOS
+    const { user } = await withAuth();
 
-    if (!session) {
-      return NextResponse.redirect(new URL("/", process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"));
+    if (!user) {
+      return NextResponse.redirect(new URL("/", process.env.NEXT_PUBLIC_APP_URL || "https://dev.slackbound.com"));
     }
 
     // Get bot scopes from manifest - these should match your Slack app configuration
@@ -47,8 +43,8 @@ export async function GET() {
       `${process.env.NEXT_PUBLIC_APP_URL}/nextjs/api/slack/callback`
     );
     
-    // Use user ID as state for CSRF protection
-    slackAuthUrl.searchParams.set("state", session.user.id);
+    // Use WorkOS user ID as state for CSRF protection
+    slackAuthUrl.searchParams.set("state", user.id);
 
     return NextResponse.redirect(slackAuthUrl.toString());
   } catch (error) {

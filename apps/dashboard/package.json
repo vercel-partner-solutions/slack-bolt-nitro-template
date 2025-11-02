@@ -22,7 +22,7 @@
     "@slack/web-api": "^7.12.0",
     "@slackbound/db": "workspace:*",
     "@tanstack/react-query": "^5.90.5",
-    "better-auth": "https://pkg.pr.new/better-auth/better-auth@a347555",
+    "@workos-inc/authkit-nextjs": "^2.11.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

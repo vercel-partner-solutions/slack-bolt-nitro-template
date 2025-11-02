@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { signOut, useSession } from "@/lib/auth-client";
+import { signOut, useAuth } from "@/lib/auth-client";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
@@ -47,13 +47,12 @@ import {
 const lato = Lato({ subsets: ["latin"], weight: ["400", "700"] });
 
 export default function DashboardPage() {
-  const { data: session, isPending } = useSession();
+  const { user, loading: isPending } = useAuth();
   const queryClient = useQueryClient();
 
-  const user = session?.user;
-  const userName = user?.name ?? "";
+  const userName = user?.firstName && user?.lastName ? `${user.firstName} ${user.lastName}` : user?.firstName || "";
   const userEmail = user?.email ?? "";
-  const userImage = user?.image ?? "";
+  const userImage = user?.profilePictureUrl ?? "";
 
   // Fetch workspace config
   const {

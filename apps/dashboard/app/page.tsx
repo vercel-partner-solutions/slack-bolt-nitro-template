@@ -5,12 +5,12 @@ import Image from "next/image";
 import { Building2, Plus, Triangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SlackIcon } from "@/components/slack-icon";
-import { authClient, useSession } from "@/lib/auth-client";
+import { useAuth } from "@/lib/auth-client";
 import { toast } from "sonner";
 import Waitlist from "./waitlist";
 
 export default function Home() {
-  const { data: session, isPending } = useSession();
+  const { user, loading: isPending } = useAuth();
   const [isLoading, setIsLoading] = useState(false);
   const [previewShift, setPreviewShift] = useState(0);
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -75,17 +75,15 @@ export default function Home() {
     );
   }
 
-  if (!session && process.env.NODE_ENV !== "development") {
+  if (!user && !isPending && process.env.NODE_ENV !== "development") {
     return <Waitlist />;
   }
 
   const handleSlackLogin = async () => {
     try {
       setIsLoading(true);
-      await authClient.signIn.social({
-        provider: "slack",
-        callbackURL: "/dashboard",
-      });
+      // Redirect to WorkOS sign-in with Slack provider
+      window.location.href = "/auth/login";
     } catch (error) {
       console.error("Login failed:", error);
       toast.error("Login failed", {

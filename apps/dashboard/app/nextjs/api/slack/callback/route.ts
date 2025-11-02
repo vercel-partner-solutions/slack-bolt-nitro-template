@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { headers } from "next/headers";
-import { getAuth } from "@/lib/auth";
+import { withAuth } from "@/lib/workos-auth";
 import { getDb } from "@/db";
 import { workspaceInstallations, workspaceConfig } from "@slackbound/db";
 import { eq } from "drizzle-orm";
@@ -63,20 +62,17 @@ export async function GET(request: Request) {
       );
     }
 
-    // Verify user is authenticated
-    const auth = getAuth();
-    const session = await auth.api.getSession({
-      headers: await headers(),
-    });
+    // Verify user is authenticated with WorkOS
+    const { user } = await withAuth();
 
-    if (!session) {
+    if (!user) {
       return NextResponse.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/?error=not_authenticated`
       );
     }
 
-    // Verify state matches user ID (CSRF protection)
-    if (state !== session.user.id) {
+    // Verify state matches WorkOS user ID (CSRF protection)
+    if (state !== user.id) {
       console.error("State mismatch - possible CSRF attack");
       return NextResponse.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?error=invalid_state`
@@ -167,7 +163,7 @@ export async function GET(request: Request) {
         botAccessToken: encryptedToken,
         botRefreshToken: null,
         scopes,
-        installedBy: session.user.id,
+        installedBy: user.id,
         installedAt: now,
         uninstalledAt: null,
         isActive: true,

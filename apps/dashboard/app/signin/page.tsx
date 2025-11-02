@@ -1,75 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { authClient, useSession } from "@/lib/auth-client";
-import { toast } from "sonner";
+import { useEffect } from "react";
+import { useAuth } from "@/lib/auth-client";
 import { SlackIcon } from "@/components/slack-icon";
+import { useRouter } from "next/navigation";
 
 export default function SignInPage() {
-  const { data: session, isPending: isSessionPending } = useSession();
-  const [isLoading, setIsLoading] = useState(false);
+  const { user, loading: isLoading } = useAuth();
+  const router = useRouter();
 
   useEffect(() => {
-    // Don't trigger login if already authenticated or session is still loading
-    if (isSessionPending || session) {
+    // If already authenticated, redirect to dashboard
+    if (user) {
+      router.push("/dashboard");
       return;
     }
 
-    // Auto-trigger Slack login on page load
-    const handleSlackLogin = async () => {
-      try {
-        setIsLoading(true);
-        await authClient.signIn.social({
-          provider: "slack",
-          callbackURL: "/dashboard",
-        });
-      } catch (error) {
-        console.error("Login failed:", error);
-        toast.error("Login failed", {
-          description: "Unable to sign in with Slack. Please try again.",
-        });
-        setIsLoading(false);
-      }
-    };
+    // If not loading and no user, redirect to WorkOS sign-in
+    if (!isLoading && !user) {
+      window.location.href = "/auth/login";
+    }
+  }, [user, isLoading, router]);
 
-    handleSlackLogin();
-  }, [session, isSessionPending]);
-
-  // Show loading state while checking session or during login
-  if (isSessionPending || isLoading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-transparent" />
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <SlackIcon className="h-4 w-4" />
-            <span>Signing in with Slack...</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // If already authenticated, redirect will happen via middleware or redirect
-  // This should not normally be seen, but provides a fallback
-  if (session) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <div className="text-sm text-muted-foreground">
-            You're already signed in. Redirecting...
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Fallback if login didn't trigger (shouldn't normally happen)
+  // Show loading state
   return (
     <div className="flex min-h-screen items-center justify-center bg-background">
       <div className="flex flex-col items-center gap-4">
-        <div className="text-sm text-muted-foreground">
-          Please wait while we redirect you to sign in...
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-transparent" />
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <SlackIcon className="h-4 w-4" />
+          <span>{user ? "Redirecting to dashboard..." : "Signing in with Slack..."}</span>
         </div>
       </div>
     </div>
