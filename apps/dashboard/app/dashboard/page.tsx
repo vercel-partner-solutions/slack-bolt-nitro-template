@@ -35,6 +35,7 @@ import configIconAnimation from "@/components/lotties/config-icon.json";
 import developerIconAnimation from "@/components/lotties/developer-icon.json";
 import { CommandPalette } from "@/components/command-palette";
 import { MemberManagementCard } from "@/components/member-management-card";
+import ArrowTriangleLineRight from "@/components/icons/arrow-triangle-line-right";
 import { redirect } from "next/navigation";
 import {
   AlertDialog,
@@ -46,6 +47,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { toast } from "sonner";
+import { CheckCircle } from "lucide-react";
 
 const lato = Lato({ subsets: ["latin"], weight: ["400", "700"] });
 
@@ -61,7 +64,7 @@ export default function DashboardPage() {
   const { data: roleData } = useQuery({
     queryKey: ["currentUserRole"],
     queryFn: getCurrentUserRole,
-    enabled: !isPending && !!user,
+    enabled: !!user,
   });
 
   const currentUserRole = roleData?.success ? roleData.data?.role : null;
@@ -75,7 +78,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["workspaceConfig"],
     queryFn: getWorkspaceConfig,
-    enabled: !isPending && !!user && isAdmin,
+    enabled: !!user && isAdmin,
     select: (result) => result.success ? result.data : null,
   });
 
@@ -91,7 +94,7 @@ export default function DashboardPage() {
   const { data: orgCheck } = useQuery({
     queryKey: ["organizationCheck"],
     queryFn: ensureUserInOrganization,
-    enabled: !isPending && !!user,
+    enabled: !!user,
     retry: false,
   });
 
@@ -130,7 +133,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["domains", inboundApiKey],
     queryFn: () => fetchInboundDomains(inboundApiKey),
-    enabled: !isPending && !!user && !!inboundApiKey,
+    enabled: !!user && !!inboundApiKey,
     select: (result) => (result.success ? result.data : []),
   });
   const domains = domainsData ?? [];
@@ -142,7 +145,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["slackChannels"],
     queryFn: fetchSlackChannels,
-    enabled: !isPending && !!user,
+    enabled: !!user,
   });
   const slackChannels = channelsResult?.success ? (channelsResult.data ?? []) : [];
   const channelsError = channelsResult?.success === false ? channelsResult : null;
@@ -154,7 +157,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["workspaceInfo"],
     queryFn: getSlackWorkspaceInfo,
-    enabled: !isPending && !!user,
+    enabled: !!user,
   });
   const workspaceInfo = workspaceResult?.success ? workspaceResult.data : null;
 
@@ -165,7 +168,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["botInstallation"],
     queryFn: checkBotInstallation,
-    enabled: !isPending && !!user,
+    enabled: !!user,
   });
   const botInstalled =
     botInstallationData?.success && "installed" in botInstallationData
@@ -197,7 +200,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["emailRoutes"],
     queryFn: fetchEmailRoutes,
-    enabled: !isPending && !!user,
+    enabled: !!user,
     select: (result: Awaited<ReturnType<typeof fetchEmailRoutes>>) =>
       result.success ? (result.data ?? []) : [],
   });
@@ -257,7 +260,7 @@ export default function DashboardPage() {
   const [identityModeLocal, setIdentityModeLocal] = useState<"name-email" | "name-only">("name-only");
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
-  const [createRouteInitialStep, setCreateRouteInitialStep] = useState<"root" | "email-address" | "channel-name" | "creating" | undefined>(undefined);
+  const [createRouteInitialStep, setCreateRouteInitialStep] = useState<"root" | "email-address" | "channel-name" | "channel-exists" | "creating" | undefined>(undefined);
   const [channelSearchQuery, setChannelSearchQuery] = useState<string>("");
   const [hasScrollableChannels, setHasScrollableChannels] = useState(false);
   const channelsListRef = useRef<HTMLDivElement>(null);
@@ -587,25 +590,51 @@ export default function DashboardPage() {
               <div className="-mx-2 divide-y divide-border">
                   {emailRoutes.map((route) => (
                     <div key={route.id} className="flex items-center justify-between px-2 py-3">
-                      <div className="min-w-0 flex-1 flex items-center gap-3">
-                        {/* Email Address */}
-                        <div className="flex items-center gap-1.5 min-w-0">
+                      <div className="min-w-0 flex-1 flex items-center gap-2">
+                        {/* Email Address - Click to Copy */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(route.emailAddress);
+                            toast.success("Email address copied to clipboard", {
+                              description: "You can now paste it into your email client.",
+                              icon: <CheckCircle className="h-4 w-4" />,
+                            });
+                          }}
+                          className="flex items-center gap-1.5 min-w-0 group hover:underline"
+                          title="Click to copy email address"
+                        >
                           <span className="text-xs text-muted-foreground">📧</span>
-                      <span className="text-sm font-medium text-foreground truncate">
+                          <span className="text-sm font-medium text-foreground truncate group-hover:text-primary">
                             {route.emailAddress}
-                      </span>
-                    </div>
+                          </span>
+                        </button>
                         
                         {/* Arrow indicator */}
-                        <span className="text-xs text-muted-foreground flex-shrink-0">→</span>
+                        <ArrowTriangleLineRight className="text-muted-foreground flex-shrink-0" />
                         
-                        {/* Channel */}
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-xs text-muted-foreground">#</span>
-                          <span className="text-sm font-medium text-foreground truncate">
-                            {route.channelName || route.channelId || "Unknown"}
-                      </span>
-                        </div>
+                        {/* Channel - Slack Deeplink */}
+                        {route.channelId ? (
+                          <a
+                            href={`https://slack.com/app_redirect?channel=${route.channelId}${workspaceInfo?.teamId ? `&team=${workspaceInfo.teamId}` : ''}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1.5 min-w-0 group hover:underline"
+                            title="Open channel in Slack"
+                          >
+                            <span className="text-xs text-muted-foreground">#</span>
+                            <span className="text-sm font-medium text-foreground truncate group-hover:text-primary">
+                              {route.channelName || route.channelId}
+                            </span>
+                          </a>
+                        ) : (
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-xs text-muted-foreground">#</span>
+                            <span className="text-sm font-medium text-foreground truncate">
+                              {route.channelName || "Unknown"}
+                            </span>
+                          </div>
+                        )}
                         
                         {/* Status indicator */}
                         {route.isActive ? (
@@ -1154,6 +1183,9 @@ export default function DashboardPage() {
           domains={domains}
           onChannelCreate={handleChannelCreate}
           initialStep={createRouteInitialStep}
+          channels={slackChannels}
+          workspaceConfig={workspaceConfigResult}
+          emailRoutes={emailRoutes}
         />
         <AlertDialog open={emailToDelete !== null} onOpenChange={(open) => !open && setEmailToDelete(null)}>
           <AlertDialogContent>

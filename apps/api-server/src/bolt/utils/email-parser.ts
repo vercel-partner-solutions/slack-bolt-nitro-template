@@ -226,6 +226,10 @@ function htmlToSlackMrkdwn(html: string): string {
   // Convert markdown bold (**) to Slack bold (*)
   markdown = markdown.replace(/\*\*(.+?)\*\*/g, '*$1*');
 
+  // Fix escaped periods in numbered lists (TurndownService escapes them unnecessarily)
+  // Match patterns like "1\. " or "1\.\n" at the start of a line and unescape them
+  markdown = markdown.replace(/^(\d+)\\\./gm, '$1.');
+
   // Clean up excessive newlines
   markdown = markdown.replace(/\n{3,}/g, '\n\n');
 

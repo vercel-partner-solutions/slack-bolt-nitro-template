@@ -20,9 +20,13 @@ import {
   createSlackChannel,
   createEmailAddress,
   linkChannelAndEmail,
+  fetchSlackChannels,
+  getWorkspaceConfig,
+  fetchEmailRoutes,
+  addUserToChannel,
 } from "@/app/actions/user-config";
 
-type Step = "root" | "email-address" | "channel-name" | "creating";
+type Step = "root" | "email-address" | "channel-name" | "channel-exists" | "creating";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -30,6 +34,9 @@ interface CommandPaletteProps {
   domains: Array<{ id: string; domain: string; status: string }>;
   onChannelCreate: (channelName: string, emailAddress: string) => void;
   initialStep?: Step;
+  channels: Array<{ id: string; name: string; isPrivate: boolean; isMember: boolean; numMembers: number }>;
+  workspaceConfig: { channelNamePrefix?: string | null } | null;
+  emailRoutes: Array<{ emailAddress: string; inboundEmailId: string | null; channelId: string | null; channelName: string | null }>;
 }
 
 export function CommandPalette({
@@ -38,6 +45,9 @@ export function CommandPalette({
   domains,
   onChannelCreate,
   initialStep,
+  channels,
+  workspaceConfig,
+  emailRoutes,
 }: CommandPaletteProps) {
   const [step, setStep] = React.useState<Step>(initialStep || "root");
   
@@ -58,6 +68,7 @@ export function CommandPalette({
     emailAddress: false,
     linking: false,
   });
+  const [existingChannel, setExistingChannel] = React.useState<{ id: string; name: string } | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   const handleCreateChannelSelect = React.useCallback(() => {
@@ -94,8 +105,30 @@ export function CommandPalette({
   const handleChannelNameSubmit = React.useCallback(async (name: string) => {
     if (!name.trim() || !emailPrefix || !selectedDomain) return;
 
-    const emailAddress = `${emailPrefix}@${selectedDomain}`;
-    const channelName = name.trim();
+    const channelName = name.trim().toLowerCase();
+    
+    // Apply prefix to check if channel already exists
+    const prefix = workspaceConfig?.channelNamePrefix || 'ext-inbd-*';
+    const finalChannelName = prefix.includes('*') 
+      ? prefix.replace('*', channelName)
+      : `${prefix}${channelName}`;
+    
+    // Check if a channel with this name already exists
+    const existing = channels.find(ch => ch.name === finalChannelName);
+    
+    if (existing) {
+      // Channel exists - show dialog
+      setExistingChannel({ id: existing.id, name: existing.name });
+      setStep("channel-exists");
+      return;
+    }
+    
+    // Channel doesn't exist - proceed with creation
+    await createChannelAndLink(channelName);
+  }, [emailPrefix, selectedDomain, channels, workspaceConfig]);
+
+  const createChannelAndLink = React.useCallback(async (channelName: string) => {
+    const emailAddress = `${emailPrefix}@${selectedDomain}`.toLowerCase();
 
     // Move to creating step
     setStep("creating");
@@ -113,17 +146,32 @@ export function CommandPalette({
       }
       setCreatingSteps((prev) => ({ ...prev, slackChannel: true }));
 
-      // Step 2: Create email address
-      const emailResult = await createEmailAddress(emailAddress);
-      if (!emailResult.success || !emailResult.emailId) {
-        throw new Error(emailResult.error || "Failed to create email address");
+      // Step 2: Check if email already exists, otherwise create it
+      const existingEmailRoute = emailRoutes.find(
+        route => route.emailAddress.toLowerCase() === emailAddress
+      );
+      
+      let emailId: string;
+      
+      if (existingEmailRoute && existingEmailRoute.inboundEmailId) {
+        // Email already exists - use existing inboundEmailId
+        console.log('Email route already exists, reusing inboundEmailId:', existingEmailRoute.inboundEmailId);
+        emailId = existingEmailRoute.inboundEmailId;
+        setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
+      } else {
+        // Email doesn't exist - create new one
+        const emailResult = await createEmailAddress(emailAddress);
+        if (!emailResult.success || !emailResult.emailId) {
+          throw new Error(emailResult.error || "Failed to create email address");
+        }
+        emailId = emailResult.emailId;
+        setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
       }
-      setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
 
       // Step 3: Link channel and email (save to database)
         const linkResult = await linkChannelAndEmail(
         channelResult.data.id,
-        emailResult.emailId,
+        emailId,
         emailAddress,
         channelResult.data.name // Pass channel name
         );
@@ -140,6 +188,7 @@ export function CommandPalette({
         setEmailPrefix("");
         setSelectedDomain("");
         setSearch("");
+        setExistingChannel(null);
         setCreatingSteps({
           slackChannel: false,
           emailAddress: false,
@@ -158,7 +207,97 @@ export function CommandPalette({
       });
       // You might want to show an error message to the user here
     }
-  }, [emailPrefix, selectedDomain, onChannelCreate, onOpenChange]);
+  }, [emailPrefix, selectedDomain, emailRoutes, onChannelCreate, onOpenChange]);
+
+  const handleLinkToExistingChannel = React.useCallback(async () => {
+    if (!existingChannel || !emailPrefix || !selectedDomain) return;
+    
+    const emailAddress = `${emailPrefix}@${selectedDomain}`.toLowerCase();
+    
+    // Move to creating step
+    setStep("creating");
+    setCreatingSteps({
+      slackChannel: true, // Skip channel creation
+      emailAddress: false,
+      linking: false,
+    });
+
+    try {
+      // Check if email already exists in our database
+      const existingEmailRoute = emailRoutes.find(
+        route => route.emailAddress.toLowerCase() === emailAddress
+      );
+      
+      let emailId: string;
+      
+      if (existingEmailRoute && existingEmailRoute.inboundEmailId) {
+        // Email already exists - use existing inboundEmailId
+        console.log('Email route already exists, reusing inboundEmailId:', existingEmailRoute.inboundEmailId);
+        emailId = existingEmailRoute.inboundEmailId;
+        setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
+      } else {
+        // Email doesn't exist - create new one
+        const emailResult = await createEmailAddress(emailAddress);
+        if (!emailResult.success || !emailResult.emailId) {
+          throw new Error(emailResult.error || "Failed to create email address");
+        }
+        emailId = emailResult.emailId;
+        setCreatingSteps((prev) => ({ ...prev, emailAddress: true }));
+      }
+
+      // Step 2: Link existing channel and email
+      const linkResult = await linkChannelAndEmail(
+        existingChannel.id,
+        emailId,
+        emailAddress,
+        existingChannel.name
+      );
+      if (!linkResult.success) {
+        throw new Error(linkResult.error || "Failed to link channel and email");
+      }
+      setCreatingSteps((prev) => ({ ...prev, linking: true }));
+
+      // Step 3: Add user to channel (if not already a member)
+      try {
+        const addUserResult = await addUserToChannel(existingChannel.id);
+        if (addUserResult.success && addUserResult.userAdded) {
+          console.log('✅ User added to channel');
+        } else if (addUserResult.success) {
+          console.log('ℹ️  User already in channel or cannot be added');
+        }
+        // Don't fail if user can't be added - the email route is still created
+      } catch (error) {
+        console.warn('Failed to add user to channel:', error);
+        // Continue anyway - the email route was created successfully
+      }
+
+      // Complete - close dialog and call callback
+      setTimeout(() => {
+        onChannelCreate(existingChannel.name, emailAddress);
+        // Reset all state
+        setStep("root");
+        setEmailPrefix("");
+        setSelectedDomain("");
+        setSearch("");
+        setExistingChannel(null);
+        setCreatingSteps({
+          slackChannel: false,
+          emailAddress: false,
+          linking: false,
+        });
+        onOpenChange(false);
+      }, 500);
+    } catch (error) {
+      console.error("Error linking to existing channel:", error);
+      // Reset to channel exists step on error
+      setStep("channel-exists");
+      setCreatingSteps({
+        slackChannel: false,
+        emailAddress: false,
+        linking: false,
+      });
+    }
+  }, [existingChannel, emailPrefix, selectedDomain, emailRoutes, onChannelCreate, onOpenChange]);
 
   const handleEmailInputKeyDown = React.useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -225,9 +364,18 @@ export function CommandPalette({
           onOpenChange(false);
         }
       }
+      // Handle Enter on channel-exists dialog
+      if (e.key === "Enter" && open && step === "channel-exists") {
+        e.preventDefault();
+        handleLinkToExistingChannel();
+      }
       // Handle Backspace/Delete to go back when input is empty
       if ((e.key === "Backspace" || e.key === "Delete") && open && !search.trim()) {
-        if (step === "channel-name") {
+        if (step === "channel-exists") {
+          e.preventDefault();
+          setStep("channel-name");
+          setExistingChannel(null);
+        } else if (step === "channel-name") {
           e.preventDefault();
           setStep("email-address");
           setSearch(emailPrefix || "");
@@ -243,7 +391,7 @@ export function CommandPalette({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, step, onOpenChange, search, emailPrefix, selectedDomain]);
+  }, [open, step, onOpenChange, search, emailPrefix, selectedDomain, handleLinkToExistingChannel]);
 
   // Filter domains for email autocomplete
   const availableDomains = domains.filter((d) => d.status === "verified");
@@ -460,6 +608,49 @@ export function CommandPalette({
                   </p>
                 </div>
               </CommandList>
+            </>
+          )}
+
+          {step === "channel-exists" && existingChannel && (
+            <>
+              <div className="border-b px-4 py-3">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <MailIcon className="h-4 w-4" />
+                  <span>Channel already exists</span>
+                </div>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">
+                    Channel #{existingChannel.name} already exists
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Would you like to add {emailPrefix}@{selectedDomain} to this existing channel, or create a new channel with a different name?
+                  </p>
+                </div>
+                
+                <div className="space-y-2">
+                  <button
+                    onClick={handleLinkToExistingChannel}
+                    className="w-full rounded-md bg-foreground px-4 py-2.5 text-sm font-medium text-background transition-colors hover:bg-foreground/90 flex items-center justify-center gap-2"
+                  >
+                    <MailIcon className="h-4 w-4" />
+                    Add email to existing channel
+                  </button>
+                  
+                  <button
+                    onClick={() => {
+                      setStep("channel-name");
+                      setExistingChannel(null);
+                      setSearch("");
+                    }}
+                    className="w-full rounded-md border border-input bg-background px-4 py-2.5 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground flex items-center justify-center gap-2"
+                  >
+                    <PlusIcon className="h-4 w-4" />
+                    Create new channel instead
+                  </button>
+                </div>
+              </div>
             </>
           )}
 

@@ -443,6 +443,7 @@ export const emailThreadReply = async ({
                     const emailData = (await emailResponse.json()) as { id: string };
                     
                     // Create route in database with inboundEmailId (marked as 'auto' type)
+                    // Note: createdByUserId is NULL for auto-created routes (system-generated)
                     await db.insert(schema.emailRoutes).values({
                       emailAddress: normalizedSenderEmail,
                       teamId,

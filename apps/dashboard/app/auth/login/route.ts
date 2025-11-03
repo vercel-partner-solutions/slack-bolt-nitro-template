@@ -1,6 +1,5 @@
 import { getSignInUrl } from '@/lib/workos-auth';
-import { redirect } from 'next/navigation';
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 /**
  * Login endpoint - redirects users to WorkOS sign-in with Slack provider
@@ -17,6 +16,6 @@ export const GET = async (request: NextRequest) => {
   const urlWithReturn = new URL(signInUrl);
   urlWithReturn.searchParams.set('returnPathname', returnTo);
   
-  return redirect(urlWithReturn.toString());
+  return NextResponse.redirect(urlWithReturn.toString());
 };
 

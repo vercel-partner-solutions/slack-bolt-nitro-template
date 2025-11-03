@@ -13,6 +13,10 @@ export const emailRoutes = pgTable("email_routes", {
     .notNull()
     .references(() => workspaceInstallations.teamId),
   
+  // User who created this route (WorkOS user ID, NULL for auto-created routes)
+  // No FK constraint since we use WorkOS auth and don't populate user table
+  createdByUserId: text("created_by_user_id"),
+  
   // Target channel (for channel routing)
   channelId: text("channel_id"),
   channelName: text("channel_name"),

@@ -2,7 +2,7 @@
 
 // Load env vars from root first
 import "@/lib/env";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { getDb } from "@/db";
 import { userConfig, workspaceConfig, emailRoutes, workspaceInstallations } from "@slackbound/db";
 import { withAuth } from "@/lib/workos-auth";
@@ -262,6 +262,38 @@ export async function createEmailAddress(emailAddress: string) {
     
     if (!emailResponse.ok) {
       const errorData = await emailResponse.json().catch(() => ({}));
+      
+      // If email already exists, fetch it instead of failing
+      if (errorData.error === "Email address already exists" || 
+          (typeof errorData.error === "string" && errorData.error.toLowerCase().includes("already exists"))) {
+        console.log(`Email ${emailAddress} already exists in Inbound.new, fetching existing email...`);
+        
+        // Fetch all email addresses to find the existing one
+        const listResponse = await fetch("https://inbound.new/api/v2/email-addresses", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${inboundApiKey}`,
+            "Content-Type": "application/json",
+          },
+        });
+        
+        if (listResponse.ok) {
+          const listData = await listResponse.json();
+          const existingEmail = listData.data?.find(
+            (e: { address: string }) => e.address.toLowerCase() === emailAddress.toLowerCase()
+          );
+          
+          if (existingEmail && existingEmail.id) {
+            console.log(`Found existing email with ID: ${existingEmail.id}`);
+            return {
+              success: true,
+              emailId: existingEmail.id,
+              data: existingEmail,
+            };
+          }
+        }
+      }
+      
       return {
         success: false,
         error: errorData.error || `Failed to create email address: ${emailResponse.statusText}`,
@@ -286,6 +318,12 @@ export async function createEmailAddress(emailAddress: string) {
 
 /**
  * Link channel and email - saves mapping to database
+ * 
+ * Upgrade logic: If an auto-created route (routeType: 'auto') already exists for
+ * this email address (created when a user replies to an email thread), this function
+ * will upgrade it to a primary route (routeType: 'primary') by updating the existing
+ * route instead of creating a new one. This ensures users can manually link channels
+ * to email addresses that were previously auto-created as reply endpoints.
  */
 export async function linkChannelAndEmail(
   channelId: string,
@@ -294,6 +332,12 @@ export async function linkChannelAndEmail(
   channelName?: string
 ) {
   try {
+    // Get authenticated user
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated" };
+    }
+    
     // Get user's workspace team_id
     const workspaceInfo = await getSlackWorkspaceInfo();
     
@@ -323,36 +367,17 @@ export async function linkChannelAndEmail(
       }
     }
     
-    // Save to emailRoutes table
+    // Save to emailRoutes table using upsert pattern
     const db = getDb();
     
     // Normalize email address to lowercase for consistent storage
     const normalizedEmailAddress = emailAddress.toLowerCase();
     
-    // Check if route already exists
-    const existingRoute = await db
-      .select()
-      .from(emailRoutes)
-      .where(eq(emailRoutes.emailAddress, normalizedEmailAddress))
-      .limit(1);
-    
-    if (existingRoute.length > 0) {
-      // Update existing route
-      await db
-        .update(emailRoutes)
-        .set({
-          channelId,
-          channelName: finalChannelName,
-          teamId,
-          inboundEmailId,
-          routeType: 'primary',
-          isActive: true,
-          updatedAt: new Date(),
-        })
-        .where(eq(emailRoutes.emailAddress, normalizedEmailAddress));
-    } else {
-      // Create new route
-      await db.insert(emailRoutes).values({
+    // Use INSERT ... ON CONFLICT DO UPDATE (upsert) to handle both create and update atomically
+    // This prevents race conditions and handles the case where the email already exists
+    await db
+      .insert(emailRoutes)
+      .values({
         emailAddress: normalizedEmailAddress,
         channelId,
         channelName: finalChannelName,
@@ -360,9 +385,23 @@ export async function linkChannelAndEmail(
         inboundEmailId,
         routeType: 'primary',
         isActive: true,
+        createdByUserId: user.id, // WorkOS user ID (no FK constraint)
+        createdAt: new Date(),
         updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: emailRoutes.emailAddress,
+        set: {
+          channelId,
+          channelName: finalChannelName,
+          teamId,
+          inboundEmailId,
+          routeType: 'primary',
+          isActive: true,
+          // Don't update createdByUserId - preserve the original creator
+          updatedAt: new Date(),
+        },
       });
-    }
     
     return {
       success: true,
@@ -378,6 +417,14 @@ export async function linkChannelAndEmail(
 
 /**
  * Fetch email routes for the current workspace
+ * 
+ * Only returns primary routes (user-created routes). Auto-created reply endpoints
+ * are excluded from this list as they are automatically generated when users reply
+ * to email threads from Slack.
+ * 
+ * Upgrade logic: When a user manually links a channel and email, any existing
+ * auto-created route for that email address is automatically upgraded to a primary
+ * route via the linkChannelAndEmail function.
  */
 export async function fetchEmailRoutes() {
   try {
@@ -393,19 +440,22 @@ export async function fetchEmailRoutes() {
     
     const teamId = workspaceInfo.data.teamId;
     
-    // Fetch routes from database (only primary routes - user-created, not auto-generated)
+    // Fetch only primary routes (user-created routes)
+    // Auto-created reply endpoints (routeType: 'auto') are excluded
     const db = getDb();
     const routes = await db
       .select()
       .from(emailRoutes)
-      .where(eq(emailRoutes.teamId, teamId));
-    
-    // Filter to only primary routes (excludes auto-created sender routes from replies)
-    const primaryRoutes = routes.filter(route => route.routeType === 'primary');
+      .where(
+        and(
+          eq(emailRoutes.teamId, teamId),
+          eq(emailRoutes.routeType, 'primary')
+        )
+      );
     
     return {
       success: true,
-      data: primaryRoutes,
+      data: routes,
     };
   } catch (error) {
     console.error("Error fetching email routes:", error);
@@ -777,6 +827,50 @@ export async function checkBotInstallation() {
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to check installation",
+    };
+  }
+}
+
+
+
+/**
+ * Add user to an existing Slack channel
+ */
+export async function addUserToChannel(channelId: string) {
+  try {
+    // Get user's workspace team_id and user_id
+    const workspaceInfo = await getSlackWorkspaceInfo();
+    
+    if (!workspaceInfo.success || !workspaceInfo.data) {
+      return {
+        success: false,
+        error: "Cannot determine your workspace. Please sign in with Slack.",
+      };
+    }
+    
+    const teamId = workspaceInfo.data.teamId;
+    const userId = workspaceInfo.data.userId;
+    
+    // Call api-server to add user to channel
+    const { apiClient } = await import("@/lib/api-client");
+    const result = await apiClient<{
+      success: boolean;
+      userAdded?: boolean;
+      error?: string;
+      message?: string;
+    }>(`/api/workspace/${teamId}/channels/${channelId}/members`, {
+      method: 'POST',
+      body: {
+        userId: userId,
+      },
+    });
+    
+    return result;
+  } catch (error) {
+    console.error("Error adding user to channel:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to add user to channel",
     };
   }
 }
@@ -1195,7 +1289,17 @@ export async function updateWorkspaceConfig(config: {
     
     // If sendingDomain is being updated, verify it exists in Inbound.new
     if (config.sendingDomain) {
-      const apiKey = await getWorkspaceInboundApiKey(teamId);
+      // Use the API key from the request if provided, otherwise check the database
+      let apiKey: string | null = null;
+      
+      if (config.inboundApiKey) {
+        // User is providing a new API key in this request - use it
+        apiKey = config.inboundApiKey;
+      } else {
+        // No API key in request - check if one exists in database
+        apiKey = await getWorkspaceInboundApiKey(teamId);
+      }
+      
       if (!apiKey) {
         return {
           success: false,

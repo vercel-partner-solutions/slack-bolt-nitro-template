@@ -55,7 +55,10 @@
         "@radix-ui/react-slot": "^1.2.3",
         "@slack/web-api": "^7.12.0",
         "@slackbound/db": "workspace:*",
+        "@tanstack/query-persist-client-core": "^5.91.5",
+        "@tanstack/query-sync-storage-persister": "^5.90.8",
         "@tanstack/react-query": "^5.90.5",
+        "@tanstack/react-query-persist-client": "^5.90.8",
         "@workos-inc/authkit-nextjs": "^2.11.0",
         "@workos-inc/node": "^7.0.0",
         "class-variance-authority": "^0.7.1",
@@ -654,7 +657,13 @@
 
     "@tanstack/query-core": ["@tanstack/query-core@5.90.6", "", {}, "sha512-AnZSLF26R8uX+tqb/ivdrwbVdGemdEDm1Q19qM6pry6eOZ6bEYiY7mWhzXT1YDIPTNEVcZ5kYP9nWjoxDLiIVw=="],
 
+    "@tanstack/query-persist-client-core": ["@tanstack/query-persist-client-core@5.91.5", "", { "dependencies": { "@tanstack/query-core": "5.90.6" } }, "sha512-wo+8ni3VBNqE2FIo8OiiaxbGNmRgyBalQnLFzupOId9gtOIsr++ADCi0dVnvdf1k+LWGfnijyWFxnXmkDKdf2A=="],
+
+    "@tanstack/query-sync-storage-persister": ["@tanstack/query-sync-storage-persister@5.90.8", "", { "dependencies": { "@tanstack/query-core": "5.90.6", "@tanstack/query-persist-client-core": "5.91.5" } }, "sha512-+jvwAxA0u6o72OCkR9Y94wxF9QGNAd8PbGseg0weqkSKf1FqDs0htprKS5NvaFnjMkxl2fzA/vZ9J2IHHB3Lzg=="],
+
     "@tanstack/react-query": ["@tanstack/react-query@5.90.6", "", { "dependencies": { "@tanstack/query-core": "5.90.6" }, "peerDependencies": { "react": "^18 || ^19" } }, "sha512-gB1sljYjcobZKxjPbKSa31FUTyr+ROaBdoH+wSSs9Dk+yDCmMs+TkTV3PybRRVLC7ax7q0erJ9LvRWnMktnRAw=="],
+
+    "@tanstack/react-query-persist-client": ["@tanstack/react-query-persist-client@5.90.8", "", { "dependencies": { "@tanstack/query-persist-client-core": "5.91.5" }, "peerDependencies": { "@tanstack/react-query": "^5.90.6", "react": "^18 || ^19" } }, "sha512-IcdOPGmk5KoQQxbsZboyurA9n6CKqdnz7BS2TAuPgbCxhVdpXloQ99hJPOk4QEtV3QhdQyAVrntiGfr/ReYobg=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.10.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg=="],
 
