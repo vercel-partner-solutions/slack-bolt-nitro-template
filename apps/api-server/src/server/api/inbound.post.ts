@@ -27,6 +27,26 @@ function getAvatarUrl(name: string, email: string): string {
 }
 
 /**
+ * Extract Message-ID from email headers without parsing content.
+ * Returns normalized Message-ID fingerprint if available, null otherwise.
+ */
+function extractMessageIdFingerprint(email: InboundWebhookPayload['email']): string | null {
+  // biome-ignore lint/suspicious/noExplicitAny: Inbound SDK types may not include messageId
+  const messageId = (email as any).messageId || (email as any).headers?.['message-id'] || (email as any).headers?.['Message-ID'];
+  
+  if (messageId) {
+    // Normalize Message-ID (remove angle brackets, whitespace, and domain)
+    // AWS SES adds domain like @us-east-2.amazonses.com to Message-IDs
+    let normalizedMessageId = messageId.replace(/^<|>$/g, '').trim();
+    // Strip domain if present (everything after @) to match awsMessageId from API
+    normalizedMessageId = normalizedMessageId.split('@')[0];
+    return `msgid:${normalizedMessageId}`;
+  }
+  
+  return null;
+}
+
+/**
  * Generate a unique fingerprint for an email to detect duplicates across reply-all scenarios.
  * 
  * The fingerprint is based on:
@@ -38,16 +58,9 @@ function getAvatarUrl(name: string, email: string): string {
  */
 function generateEmailFingerprint(email: InboundWebhookPayload['email'], contentHash: string): string {
   // Try to use Message-ID header if available (most reliable)
-  // biome-ignore lint/suspicious/noExplicitAny: Inbound SDK types may not include messageId
-  const messageId = (email as any).messageId || (email as any).headers?.['message-id'] || (email as any).headers?.['Message-ID'];
-  
-  if (messageId) {
-    // Normalize Message-ID (remove angle brackets, whitespace, and domain)
-    // AWS SES adds domain like @us-east-2.amazonses.com to Message-IDs
-    let normalizedMessageId = messageId.replace(/^<|>$/g, '').trim();
-    // Strip domain if present (everything after @) to match awsMessageId from API
-    normalizedMessageId = normalizedMessageId.split('@')[0];
-    return `msgid:${normalizedMessageId}`;
+  const messageIdFingerprint = extractMessageIdFingerprint(email);
+  if (messageIdFingerprint) {
+    return messageIdFingerprint;
   }
   
   // Fallback fingerprint based on email characteristics
@@ -131,7 +144,31 @@ export default eventHandler(async (event) => {
     const fromEmail = fromAddress?.address || '';
     const subject = email.subject || '(No Subject)';
 
-    // Parse email content early to generate fingerprint for duplicate detection
+    // OPTIMIZATION: Try to check if email was sent by us BEFORE parsing content
+    // Most emails we send have Message-ID which we can check without expensive parsing
+    const messageIdFingerprint = extractMessageIdFingerprint(email);
+    if (messageIdFingerprint) {
+      console.log(`[INBOUND] 🔑 Message-ID fingerprint: ${messageIdFingerprint}`);
+      const sentByUs = await threadStorage.wasEmailSentByUs(messageIdFingerprint);
+      if (sentByUs) {
+        console.log(`[INBOUND] 🔄 Email was sent by us (from Slack), skipping to avoid loop`);
+        console.log(`  Email ID: ${email.id}`);
+        console.log(`  Fingerprint: ${messageIdFingerprint}`);
+        console.log(`  Thread ID: ${email.threadId || 'none'}`);
+        console.log(`  Subject: ${email.subject || '(No Subject)'}`);
+        // Mark as processed to avoid future checks
+        await threadStorage.markEmailProcessed(email.id);
+        return {
+          success: true,
+          skipped: true,
+          reason: 'sent_by_us',
+          emailId: email.id,
+          fingerprint: messageIdFingerprint,
+        };
+      }
+    }
+
+    // Parse email content (needed for composite fingerprint or if Message-ID check didn't skip)
     console.log('[INBOUND] 📝 Parsing email content...');
     const { text: cleanedText, images } = parseEmailContent(email);
     console.log(`[INBOUND] 📝 Parsed ${cleanedText.length} chars, ${images.length} images`);
@@ -143,26 +180,30 @@ export default eventHandler(async (event) => {
       .substring(0, 16);
 
     // Generate email fingerprint for duplicate detection (handles reply-all scenarios)
+    // If Message-ID fingerprint exists, this will return it; otherwise composite fingerprint
     const emailFingerprint = generateEmailFingerprint(email, contentHash);
     console.log(`[INBOUND] 🔑 Email fingerprint: ${emailFingerprint}`);
 
-    // Check if this email was sent by us (from Slack) - if so, skip processing to avoid loops
-    const sentByUs = await threadStorage.wasEmailSentByUs(emailFingerprint);
-    if (sentByUs) {
-      console.log(`[INBOUND] 🔄 Email was sent by us (from Slack), skipping to avoid loop`);
-      console.log(`  Email ID: ${email.id}`);
-      console.log(`  Fingerprint: ${emailFingerprint}`);
-      console.log(`  Thread ID: ${email.threadId || 'none'}`);
-      console.log(`  Subject: ${email.subject || '(No Subject)'}`);
-      // Mark as processed to avoid future checks
-      await threadStorage.markEmailProcessed(email.id);
-      return {
-        success: true,
-        skipped: true,
-        reason: 'sent_by_us',
-        emailId: email.id,
-        fingerprint: emailFingerprint,
-      };
+    // Check again if this email was sent by us (in case it uses composite fingerprint)
+    // This handles cases where Message-ID wasn't available in the initial check
+    if (!messageIdFingerprint) {
+      const sentByUs = await threadStorage.wasEmailSentByUs(emailFingerprint);
+      if (sentByUs) {
+        console.log(`[INBOUND] 🔄 Email was sent by us (from Slack), skipping to avoid loop`);
+        console.log(`  Email ID: ${email.id}`);
+        console.log(`  Fingerprint: ${emailFingerprint}`);
+        console.log(`  Thread ID: ${email.threadId || 'none'}`);
+        console.log(`  Subject: ${email.subject || '(No Subject)'}`);
+        // Mark as processed to avoid future checks
+        await threadStorage.markEmailProcessed(email.id);
+        return {
+          success: true,
+          skipped: true,
+          reason: 'sent_by_us',
+          emailId: email.id,
+          fingerprint: emailFingerprint,
+        };
+      }
     }
 
     // Dual idempotency check: both email.id and fingerprint

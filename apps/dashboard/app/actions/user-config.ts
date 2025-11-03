@@ -422,12 +422,21 @@ export async function linkChannelAndEmail(
  * are excluded from this list as they are automatically generated when users reply
  * to email threads from Slack.
  * 
+ * For non-admin users: Only returns routes created by the current user
+ * For admin users: Returns all routes in the workspace
+ * 
  * Upgrade logic: When a user manually links a channel and email, any existing
  * auto-created route for that email address is automatically upgraded to a primary
  * route via the linkChannelAndEmail function.
  */
 export async function fetchEmailRoutes() {
   try {
+    // Get authenticated user
+    const { user } = await withAuth();
+    if (!user) {
+      return { success: false, error: "not_authenticated", data: [] };
+    }
+
     // Get user's workspace team_id
     const workspaceInfo = await getSlackWorkspaceInfo();
     
@@ -435,23 +444,35 @@ export async function fetchEmailRoutes() {
       return {
         success: false,
         error: "Cannot determine your workspace. Please sign in with Slack.",
+        data: [],
       };
     }
     
     const teamId = workspaceInfo.data.teamId;
+
+    // Check if user is admin
+    const roleCheck = await getCurrentUserRole();
+    const isAdmin = roleCheck.success && roleCheck.data?.role === 'admin';
     
     // Fetch only primary routes (user-created routes)
     // Auto-created reply endpoints (routeType: 'auto') are excluded
     const db = getDb();
+    
+    // Build query conditions
+    const conditions = [
+      eq(emailRoutes.teamId, teamId),
+      eq(emailRoutes.routeType, 'primary')
+    ];
+
+    // For non-admin users, only show routes they created
+    if (!isAdmin) {
+      conditions.push(eq(emailRoutes.createdByUserId, user.id));
+    }
+
     const routes = await db
       .select()
       .from(emailRoutes)
-      .where(
-        and(
-          eq(emailRoutes.teamId, teamId),
-          eq(emailRoutes.routeType, 'primary')
-        )
-      );
+      .where(and(...conditions));
     
     return {
       success: true,
@@ -560,23 +581,37 @@ export async function deleteEmailRoute(emailAddress: string) {
   }
 }
 /**
- * Get Slack user ID from WorkOS user profile
- * WorkOS stores the Slack user ID in the user's raw profile data
+ * Get Slack user ID for the currently authenticated WorkOS user
+ * This retrieves the Slack user ID that was stored during Slack OAuth installation
+ * 
+ * @returns The Slack user ID (e.g., U01234567) or null if not found
+ * @example
+ * const slackUserId = await getSlackUserId();
+ * if (slackUserId) {
+ *   // Use slackUserId to invite user to channel
+ * }
  */
-async function getSlackUserId(): Promise<string | null> {
+export async function getSlackUserId(): Promise<string | null> {
   try {
     const { user } = await withAuth();
     if (!user) {
       return null;
     }
 
-    // WorkOS stores the OAuth provider's user ID in rawAttributes
-    // For Slack OAuth, this contains the Slack user ID
-    const slackUserId = user.profilePictureUrl ? user.id : null;
+    // Look up the user's Slack ID from userConfig table
+    const db = getDb();
+    const config = await db
+      .select()
+      .from(userConfig)
+      .where(eq(userConfig.userId, user.id))
+      .limit(1);
     
-    // TODO: Get actual Slack user ID from WorkOS profile
-    // For now, we'll get it from workspace installations
-    return slackUserId;
+    if (config.length === 0 || !config[0].slackUserId) {
+      console.warn(`[getSlackUserId] No Slack user ID found for WorkOS user ${user.id}. User may need to reinstall the bot.`);
+      return null;
+    }
+    
+    return config[0].slackUserId;
   } catch (error) {
     console.error("Error getting Slack user ID:", error);
     return null;
@@ -838,7 +873,7 @@ export async function checkBotInstallation() {
  */
 export async function addUserToChannel(channelId: string) {
   try {
-    // Get user's workspace team_id and user_id
+    // Get user's workspace team_id
     const workspaceInfo = await getSlackWorkspaceInfo();
     
     if (!workspaceInfo.success || !workspaceInfo.data) {
@@ -849,7 +884,16 @@ export async function addUserToChannel(channelId: string) {
     }
     
     const teamId = workspaceInfo.data.teamId;
-    const userId = workspaceInfo.data.userId;
+    
+    // Get the actual user's Slack ID (not the bot's ID)
+    const userId = await getSlackUserId();
+    
+    if (!userId) {
+      return {
+        success: false,
+        error: "Cannot determine your Slack user ID. Please reinstall the bot.",
+      };
+    }
     
     // Call api-server to add user to channel
     const { apiClient } = await import("@/lib/api-client");
@@ -880,7 +924,7 @@ export async function addUserToChannel(channelId: string) {
  */
 export async function createSlackChannel(channelName: string, isPrivate: boolean = false) {
   try {
-    // Get user's workspace team_id and user_id
+    // Get user's workspace team_id
     const workspaceInfo = await getSlackWorkspaceInfo();
     
     if (!workspaceInfo.success || !workspaceInfo.data) {
@@ -891,7 +935,13 @@ export async function createSlackChannel(channelName: string, isPrivate: boolean
     }
     
     const teamId = workspaceInfo.data.teamId;
-    const userId = workspaceInfo.data.userId;
+    
+    // Get the actual user's Slack ID (not the bot's ID)
+    const userId = await getSlackUserId();
+    
+    if (!userId) {
+      console.warn("[createSlackChannel] No Slack user ID found - channel will be created but user may not be added");
+    }
     
     // Validate channel name
     if (!channelName || channelName.trim().length === 0) {
@@ -1581,6 +1631,46 @@ export async function updateMemberRole(membershipId: string, newRole: 'admin' | 
       error: error instanceof Error ? error.message : "Failed to update role",
     };
   }
+}
+
+/**
+ * Get seat usage information for the current workspace
+ * Returns current usage, limit, and availability from Autumn
+ */
+export async function getSeatUsage() {
+	try {
+		const workspaceInfo = await getSlackWorkspaceInfo();
+		
+		if (!workspaceInfo.success || !workspaceInfo.data) {
+			return {
+				success: false,
+				error: "Cannot determine your workspace. Please sign in with Slack.",
+			};
+		}
+		
+		const teamId = workspaceInfo.data.teamId;
+		
+		// Call api-server to get seat usage
+		const { apiClient } = await import("@/lib/api-client");
+		const result = await apiClient<{
+			success: boolean;
+			data?: {
+				currentUsage: number;
+				limit: number;
+				allowed: boolean;
+				available: number;
+			};
+			error?: string;
+		}>(`/api/workspace/${teamId}/seat-usage`);
+		
+		return result;
+	} catch (error) {
+		console.error("Error fetching seat usage:", error);
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : "Failed to fetch seat usage",
+		};
+	}
 }
 
 /**

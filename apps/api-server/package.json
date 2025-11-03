@@ -28,14 +28,17 @@
   "dependencies": {
     "@inboundemail/sdk": "^4.3.1",
     "@neondatabase/serverless": "^1.0.2",
-    "@slackbound/db": "workspace:*",
     "@slack/bolt": "^4.5.0",
     "@slack/web-api": "^7.11.0",
+    "@slackbound/db": "workspace:*",
     "@upstash/redis": "^1.35.6",
     "@vercel/slack-bolt": "^0.1.5",
+    "@workos-inc/node": "^7.72.1",
+    "autumn-js": "^0.1.43",
     "drizzle-orm": "^0.44.7",
     "email-reply-parser": "^2.1.0",
     "node-emoji": "^2.2.0",
+    "slack-mrkdwn": "^0.1.9-betta",
     "turndown": "^7.2.1"
   },
   "devDependencies": {

@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/workos-auth";
 import { getDb } from "@/db";
-import { workspaceInstallations, workspaceConfig } from "@slackbound/db";
+import { workspaceInstallations, workspaceConfig, userConfig } from "@slackbound/db";
 import { eq } from "drizzle-orm";
 import { createCipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { getOrCreateOrganization, addUserToOrganization } from "@/lib/workos-organizations";
+import { Autumn } from 'autumn-js';
 
 // Encryption utilities (copied from api-server for now)
 const ALGORITHM = 'aes-256-gcm';
@@ -111,6 +112,9 @@ export async function GET(request: Request) {
     const botAccessToken = data.access_token;
     const scopes = data.scope;
     const enterpriseId = data.enterprise?.id;
+    
+    // Extract the authenticated user's Slack ID (the person installing the bot)
+    const authedUserId = data.authed_user?.id;
 
     if (!teamId || !botAccessToken || !botUserId) {
       console.error("Missing required data from Slack OAuth response");
@@ -193,6 +197,76 @@ export async function GET(request: Request) {
       });
 
       console.log(`Created new installation for workspace: ${teamId}`);
+    }
+
+    // Store the authenticated user's Slack ID in userConfig for user-to-channel invitations
+    if (authedUserId) {
+      try {
+        const existingUserConfig = await db
+          .select()
+          .from(userConfig)
+          .where(eq(userConfig.userId, user.id))
+          .limit(1);
+        
+        if (existingUserConfig.length > 0) {
+          // Update existing user config with Slack mapping
+          await db
+            .update(userConfig)
+            .set({
+              slackUserId: authedUserId,
+              slackTeamId: teamId,
+              updatedAt: now,
+            })
+            .where(eq(userConfig.userId, user.id));
+          console.log(`[UserConfig] Updated Slack mapping for WorkOS user ${user.id} → Slack user ${authedUserId}`);
+        } else {
+          // Create new user config with Slack mapping
+          await db.insert(userConfig).values({
+            userId: user.id,
+            slackUserId: authedUserId,
+            slackTeamId: teamId,
+            shouldShowFullEmail: false,
+            createdAt: now,
+            updatedAt: now,
+          });
+          console.log(`[UserConfig] Created Slack mapping for WorkOS user ${user.id} → Slack user ${authedUserId}`);
+        }
+      } catch (error) {
+        // Non-critical - log but don't fail installation
+        console.error('[UserConfig] Error storing Slack user mapping:', error);
+      }
+    } else {
+      console.warn('[UserConfig] No authed_user.id in Slack OAuth response - cannot map Slack user ID');
+    }
+
+    // Attach free tier product to the WorkOS organization in Autumn
+    try {
+      const autumnApiKey = process.env.AUTUMN_API_KEY;
+      if (autumnApiKey) {
+        const autumn = new Autumn({ secretKey: autumnApiKey });
+        await autumn.attach({
+          customer_id: workosOrg.id,
+          product_id: 'free_tier',
+        });
+        console.log(`[Autumn] Attached free_tier product to organization ${workosOrg.id}`);
+        
+        // Update customer metadata for searchability in Autumn dashboard
+        // This makes it easier to identify workspaces by name rather than just WorkOS org ID
+        try {
+          await autumn.customers.update(workosOrg.id, {
+            name: teamName,
+          });
+          console.log(`[Autumn] Updated customer metadata for ${workosOrg.id}: ${teamName}`);
+        } catch (metadataError) {
+          // Non-critical - log but don't fail installation
+          console.warn('[Autumn] Error updating customer metadata (non-critical):', metadataError);
+        }
+      } else {
+        console.warn('[Autumn] AUTUMN_API_KEY not configured, skipping product attachment');
+      }
+    } catch (error) {
+      console.error('[Autumn] Error attaching free tier product:', error);
+      // Don't fail the installation if Autumn attachment fails
     }
 
     // Redirect to dashboard with success message

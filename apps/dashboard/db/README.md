@@ -50,8 +50,11 @@ See the [shared database package README](../../../packages/db/README.md) for com
 
 ### Key Tables
 
-- **`user`, `session`, `account`, `verification`** - Better-Auth authentication tables
-- **`userConfig`** - User-specific configuration for email sending
+- **`userConfig`** - User settings and Slack identity mapping (WorkOS → Slack user ID)
+- **`workspaceInstallations`** - Slack workspace bot installations
+- **`workspaceConfig`** - Workspace-level settings
+- **`emailRoutes`** - Email routing configuration
+- **`workspaceSeatUsage`** - Seat usage tracking for billing
 - **`waitlist`** - Waitlist email signups
 
 ## Using the Database
@@ -63,7 +66,7 @@ See the [shared database package README](../../../packages/db/README.md) for com
 import { getDb } from "@/db";
 
 // Schemas (from shared package)
-import { waitlist, user, userConfig } from "@slackbound/db";
+import { waitlist, userConfig } from "@slackbound/db";
 import { eq } from "drizzle-orm";
 
 const db = getDb();
@@ -168,5 +171,5 @@ If you're getting type errors:
 
 - [Drizzle ORM Documentation](https://orm.drizzle.team/docs/overview)
 - [Neon PostgreSQL Documentation](https://neon.tech/docs/introduction)
-- [Better-Auth Database Schema](https://www.better-auth.com/docs/concepts/database)
+- [WorkOS Authentication](https://workos.com/docs/user-management)
 

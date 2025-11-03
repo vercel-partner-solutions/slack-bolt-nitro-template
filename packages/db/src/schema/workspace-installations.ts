@@ -1,5 +1,4 @@
 import { pgTable, text, timestamp, boolean } from "drizzle-orm/pg-core";
-import { user } from "./user";
 
 export const workspaceInstallations = pgTable("workspace_installations", {
   // Primary identifier - Slack workspace ID
@@ -22,9 +21,7 @@ export const workspaceInstallations = pgTable("workspace_installations", {
   
   // Installation metadata
   scopes: text("scopes").notNull(), // Comma-separated bot scopes
-  installedBy: text("installed_by")
-    .notNull()
-    .references(() => user.id), // User who installed the bot
+  installedBy: text("installed_by").notNull(), // WorkOS user ID (no FK constraint)
   installedAt: timestamp("installed_at").notNull(),
   uninstalledAt: timestamp("uninstalled_at"), // Soft delete timestamp
   

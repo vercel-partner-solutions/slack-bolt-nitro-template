@@ -23,3 +23,5 @@ drizzle
 npm-debug.log*
 pnpm-debug.log*
 .pnpm-debug.log*
+.env.development
+.env.production

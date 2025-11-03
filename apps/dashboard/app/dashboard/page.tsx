@@ -36,6 +36,7 @@ import developerIconAnimation from "@/components/lotties/developer-icon.json";
 import { CommandPalette } from "@/components/command-palette";
 import { MemberManagementCard } from "@/components/member-management-card";
 import ArrowTriangleLineRight from "@/components/icons/arrow-triangle-line-right";
+import { DashboardCard } from "@/components/dashboard-card";
 import { redirect } from "next/navigation";
 import {
   AlertDialog,
@@ -70,7 +71,7 @@ export default function DashboardPage() {
   const currentUserRole = roleData?.success ? roleData.data?.role : null;
   const isAdmin = currentUserRole === "admin";
 
-  // Fetch workspace config - only for admins
+  // Fetch workspace config - admins can read/write, non-admins can read (for inbound API key)
   const {
     data: workspaceConfigResult,
     isLoading: isInitialLoading,
@@ -78,16 +79,16 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ["workspaceConfig"],
     queryFn: getWorkspaceConfig,
-    enabled: !!user && isAdmin,
+    enabled: !!user, // Allow all authenticated users to read config
     select: (result) => result.success ? result.data : null,
   });
 
-  // Sync identity mode from server
+  // Sync identity mode from server - only for admins (who can edit)
   useEffect(() => {
-    if (workspaceConfigResult?.shouldShowFullEmail !== undefined) {
+    if (isAdmin && workspaceConfigResult?.shouldShowFullEmail !== undefined) {
       setIdentityModeLocal(workspaceConfigResult.shouldShowFullEmail ? "name-email" : "name-only");
     }
-  }, [workspaceConfigResult?.shouldShowFullEmail]);
+  }, [workspaceConfigResult?.shouldShowFullEmail, isAdmin]);
 
   // Ensure user is added to their workspace's WorkOS organization
   // This handles users who sign in after the bot is installed
@@ -98,30 +99,30 @@ export default function DashboardPage() {
     retry: false,
   });
 
-  // Sync sendingDomain state with query data
+  // Sync sendingDomain state with query data - only for admins (who can edit)
   useEffect(() => {
-    if (workspaceConfigResult?.sendingDomain !== undefined) {
+    if (isAdmin && workspaceConfigResult?.sendingDomain !== undefined) {
       setSendingDomain(workspaceConfigResult.sendingDomain || "");
     }
-  }, [workspaceConfigResult?.sendingDomain]);
+  }, [workspaceConfigResult?.sendingDomain, isAdmin]);
 
   // Track if channelNamePrefix has been initialized to avoid debounce on initial load
   const channelNamePrefixInitializedRef = useRef(false);
 
-  // Sync channelNamePrefix state with query data
+  // Sync channelNamePrefix state with query data - only for admins (who can edit)
   useEffect(() => {
-    if (workspaceConfigResult?.channelNamePrefix !== undefined) {
+    if (isAdmin && workspaceConfigResult?.channelNamePrefix !== undefined) {
       setChannelNamePrefix(workspaceConfigResult.channelNamePrefix || "ext-inbd-*");
       channelNamePrefixInitializedRef.current = true;
     }
-  }, [workspaceConfigResult?.channelNamePrefix]);
+  }, [workspaceConfigResult?.channelNamePrefix, isAdmin]);
 
-  // Sync inboundApiKey state with query data
+  // Sync inboundApiKey state with query data - only for admins (who can edit)
   useEffect(() => {
-    if (workspaceConfigResult?.inboundApiKey !== undefined) {
+    if (isAdmin && workspaceConfigResult?.inboundApiKey !== undefined) {
       setInboundApiKeyInput(workspaceConfigResult.inboundApiKey || "");
     }
-  }, [workspaceConfigResult?.inboundApiKey]);
+  }, [workspaceConfigResult?.inboundApiKey, isAdmin]);
 
   // Get inbound API key from workspace config
   const inboundApiKey = workspaceConfigResult?.inboundApiKey ?? "";
@@ -425,17 +426,12 @@ export default function DashboardPage() {
         ) : (
           <div className="space-y-6">
             {/* Slack Channels Card */}
-            <div className="rounded-lg border border-border bg-background p-6">
-              <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                <span className="h-[1.25em] w-[1.25em]">
-                  <LottieIcon animationData={slackLogoAnimation} />
-                </span>
-                Available Slack Channels
-              </h2>
-              <p className="mb-6 text-sm text-muted-foreground">
-                All available channels in your Slack workspace.
-              </p>
-              <hr className="my-6 border-border" />
+            <DashboardCard
+              icon={<LottieIcon animationData={slackLogoAnimation} />}
+              title="Available Slack Channels"
+              subtitle="All available channels in your Slack workspace."
+              hidden={true}
+            >
               {isLoadingChannels ? (
                 <div className="flex items-center gap-3 py-4">
                   <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -543,20 +539,14 @@ export default function DashboardPage() {
                   )}
                 </div>
               )}
-            </div>
+            </DashboardCard>
 
             {/* Email Routes Card */}
-            <div className="rounded-lg border border-border bg-background p-6">
-              <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                <span className="h-[1.25em] w-[1.25em]">
-                  <LottieIcon animationData={slackLogoAnimation} />
-                </span>
-                Email Routes
-              </h2>
-              <p className="mb-6 text-sm text-muted-foreground">
-                Slack channels linked to email addresses. Emails sent to these addresses will be posted in the corresponding channels.
-              </p>
-              <hr className="my-6 border-border" />
+            <DashboardCard
+              icon={<LottieIcon animationData={slackLogoAnimation} />}
+              title={isAdmin ? "Email Routes" : "Your Email Routes"}
+              subtitle="Slack channels linked to email addresses. Emails sent to these addresses will be posted in the corresponding channels."
+            >
               {isLoadingRoutes ? (
                 <div className="flex items-center gap-3 py-4">
                   <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -657,24 +647,18 @@ export default function DashboardPage() {
                 ))}
               </div>
               )}
-            </div>
+            </DashboardCard>
 
             {/* Member Management Card */}
             <MemberManagementCard />
 
             {/* Developer Card - Only visible in development */}
             {process.env.NODE_ENV === 'development' && (
-            <div className="rounded-lg border border-border bg-background p-6">
-              <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                <span className="h-[1.25em] w-[1.25em]">
-                  <LottieIcon animationData={developerIconAnimation} />
-                </span>
-                Developer
-              </h2>
-              <p className="mb-6 text-sm text-muted-foreground">
-                Workspace information and development tools.
-              </p>
-              <hr className="my-6 border-border" />
+            <DashboardCard
+              icon={<LottieIcon animationData={developerIconAnimation} />}
+              title="Developer"
+              subtitle="Workspace information and development tools."
+            >
               {isLoadingWorkspace ? (
                 <div className="flex items-center gap-3 py-4">
                   <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -919,22 +903,16 @@ export default function DashboardPage() {
                   No workspace information available.
                 </p>
               )}
-            </div>
+            </DashboardCard>
             )}
 
             {/* Workspace Configuration Card - Only visible to admins */}
             {isAdmin && (
-            <div className="rounded-lg border border-border bg-background p-6">
-              <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                <span className="h-[1.25em] w-[1.25em]">
-                  <LottieIcon animationData={configIconAnimation} />
-                </span>
-                Workspace Configuration
-              </h2>
-              <p className="mb-6 text-sm text-muted-foreground">
-                These settings control how messages appear in Slack for all users in your workspace.
-              </p>
-              <hr className="my-6 border-border" />
+            <DashboardCard
+              icon={<LottieIcon animationData={configIconAnimation} />}
+              title="Workspace Configuration"
+              subtitle="These settings control how messages appear in Slack for all users in your workspace."
+            >
               <div className="space-y-5 w-full">
                 {/* Inbound API key configuration */}
                 <div className="grid-cols-2 gap-2 grid items-start">
@@ -1167,7 +1145,7 @@ export default function DashboardPage() {
 
                 
               </div>
-            </div>
+            </DashboardCard>
             )}
           </div>
         )}

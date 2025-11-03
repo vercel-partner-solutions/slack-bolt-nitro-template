@@ -3,9 +3,31 @@ import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from '@slack/bolt';
 import { createHash } from 'node:crypto';
 import { getInboundApiKey } from '../../utils/config';
 import { convertSlackEmojisToEmojis } from '../../utils/slack-emoji-converter';
+import { convertSlackMarkdownToHtml } from '../../utils/slack-mrkdwn-to-html';
 import { threadStorage } from '../../utils/thread-storage';
 import { db, schema } from '../../../server/db';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
+import { getWorkOsUserFromSlackUser } from '../../utils/workos-mapping';
+import { checkSeatAvailability, trackSeatUsage } from '../../utils/autumn-client';
+
+/**
+ * Helper function to strip HTML tags for plain text email fallback
+ * Preserves paragraph structure and line breaks
+ */
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<\/p>/gi, '\n') // Add newline after closing p tags
+    .replace(/<br\s*\/?>/gi, '\n') // Replace br tags with newlines
+    .replace(/<\/li>/gi, '\n') // Add newline after list items
+    .replace(/<[^>]*>/g, '') // Remove all remaining HTML tags
+    .replace(/&nbsp;/g, ' ') // Replace &nbsp; with space
+    .replace(/&amp;/g, '&') // Replace &amp; with &
+    .replace(/&lt;/g, '<') // Replace &lt; with <
+    .replace(/&gt;/g, '>') // Replace &gt; with >
+    .replace(/&quot;/g, '"') // Replace &quot; with "
+    .replace(/\n\n+/g, '\n\n') // Collapse multiple blank lines into double newlines
+    .trim();
+}
 
 /**
  * Helper function to map Slack file types to MIME types
@@ -64,6 +86,164 @@ export const emailThreadReply = async ({
       logger.info(`Message ${event.ts} already processed, skipping duplicate`);
       return;
     }
+
+    // ========== SEAT MANAGEMENT: Check if user is authorized and within seat limits ==========
+    const slackUserId = event.user;
+    
+    // Extract teamId from event (Slack doesn't expose it in types but it exists at runtime)
+    const eventWithTeamInfo = event as typeof event & { team?: string; team_id?: string };
+    const eventTeamId = eventWithTeamInfo.team || eventWithTeamInfo.team_id;
+
+    if (!slackUserId || !eventTeamId) {
+      logger.warn('Missing slack user ID or team ID, cannot verify seat access');
+      return;
+    }
+
+    // Check if user is authenticated via WorkOS
+    const authResult = await getWorkOsUserFromSlackUser(slackUserId, eventTeamId);
+
+    if (!authResult.isAuthenticated) {
+      logger.info(`User ${slackUserId} is not authenticated, blocking reply`);
+      
+      // Send ephemeral message to user
+      try {
+        await client.chat.postEphemeral({
+          channel: 'channel' in event ? event.channel : '',
+          user: slackUserId,
+          text: '⚠️ Authentication Required',
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: '*Authentication Required*\n\nYou need to set up a Slackbound account to reply to emails in threads.',
+              },
+            },
+            {
+              type: 'actions',
+              elements: [
+                {
+                  type: 'button',
+                  text: {
+                    type: 'plain_text',
+                    text: 'Set Up Account',
+                  },
+                  url: process.env.NEXT_PUBLIC_APP_URL || 'https://slackbound.com',
+                  action_id: 'setup_account',
+                },
+              ],
+            },
+          ],
+        });
+      } catch (error) {
+        logger.error('Error sending authentication required message:', error);
+      }
+      return;
+    }
+
+    const { workosOrganizationId, workosUserId } = authResult;
+    if (!workosOrganizationId || !workosUserId) {
+      logger.warn('Missing WorkOS organization or user ID');
+      return;
+    }
+
+    // Check if user already has a seat
+    const existingSeats = await db
+      .select()
+      .from(schema.workspaceSeatUsage)
+      .where(
+        and(
+          eq(schema.workspaceSeatUsage.workosOrganizationId, workosOrganizationId),
+          eq(schema.workspaceSeatUsage.slackUserId, slackUserId),
+        ),
+      )
+      .limit(1);
+
+    const hasSeat = existingSeats.length > 0;
+
+    if (!hasSeat) {
+      // User doesn't have a seat, check if we can add one
+      logger.info(`User ${slackUserId} doesn't have a seat, checking availability`);
+
+      try {
+        const seatCheck = await checkSeatAvailability(workosOrganizationId);
+
+        if (!seatCheck.allowed) {
+          logger.info(`Seat limit reached for organization ${workosOrganizationId} (${seatCheck.currentUsage}/${seatCheck.limit})`);
+
+          // Send ephemeral message about seat limit
+          try {
+            await client.chat.postEphemeral({
+              channel: 'channel' in event ? event.channel : '',
+              user: slackUserId,
+              text: '⚠️ Seat Limit Reached',
+              blocks: [
+                {
+                  type: 'section',
+                  text: {
+                    type: 'mrkdwn',
+                    text: `*Seat Limit Reached*\n\nYour workspace has reached the free tier limit of ${seatCheck.limit} seats.\n\nUpgrade to add more users.`,
+                  },
+                },
+                {
+                  type: 'actions',
+                  elements: [
+                    {
+                      type: 'button',
+                      text: {
+                        type: 'plain_text',
+                        text: 'Upgrade Plan',
+                      },
+                      url: `${process.env.NEXT_PUBLIC_APP_URL || 'https://slackbound.com'}/upgrade`,
+                      action_id: 'upgrade_plan',
+                    },
+                  ],
+                },
+              ],
+            });
+          } catch (error) {
+            logger.error('Error sending seat limit message:', error);
+          }
+          return;
+        }
+
+        // Seat is available, get user info from Slack
+        let slackUserName = 'Unknown User';
+        let slackUserEmail: string | null = null;
+
+        try {
+          const userInfo = await client.users.info({ user: slackUserId });
+          slackUserName = userInfo.user?.real_name || userInfo.user?.name || slackUserName;
+          slackUserEmail = userInfo.user?.profile?.email || null;
+        } catch (error) {
+          logger.warn('Could not fetch user info from Slack:', error);
+        }
+
+        // Create seat record
+        await db.insert(schema.workspaceSeatUsage).values({
+          workosOrganizationId,
+          workosUserId,
+          slackUserId,
+          slackUserName,
+          slackUserEmail,
+          firstReplyAt: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+
+        // Track seat usage in Autumn
+        await trackSeatUsage(workosOrganizationId, 1, `seat-${slackUserId}-${Date.now()}`);
+
+        logger.info(`Seat assigned to user ${slackUserId} in organization ${workosOrganizationId}`);
+      } catch (error) {
+        logger.error('Error checking or assigning seat:', error);
+        // On error, allow the message to proceed (fail open for better UX)
+        logger.warn('Proceeding with message despite seat check error');
+      }
+    } else {
+      logger.info(`User ${slackUserId} already has a seat, proceeding with reply`);
+    }
+    // ========== END SEAT MANAGEMENT ==========
 
     // Get the Inbound thread ID from storage
     const inboundThreadId = await threadStorage.getInboundThreadId(event.thread_ts);
@@ -267,9 +447,11 @@ export const emailThreadReply = async ({
       return;
     }
 
-    // Convert Slack emoji syntax to Unicode emojis
+    // Convert Slack emoji syntax to Unicode emojis first
     if (messageText) {
       messageText = await convertSlackEmojisToEmojis(messageText, client, 'html');
+      // Then convert Slack markdown to HTML
+      messageText = convertSlackMarkdownToHtml(messageText);
     } else {
       messageText = ''; // Set empty string if no text
     }
@@ -533,8 +715,8 @@ export const emailThreadReply = async ({
         contentType: string;
       }>;
     } = {
-      html: messageText || '', // Use HTML format to support inline images for custom emojis
-      text: messageText ? messageText.replace(/<img[^>]*>/g, '') : 'Email with attachments', // Fallback plain text without img tags
+      html: messageText || '', // HTML format with proper formatting from Slack markdown
+      text: messageText ? stripHtmlTags(messageText) : 'Email with attachments', // Plain text fallback with all HTML stripped
       from: generatedEmail,
     };
 

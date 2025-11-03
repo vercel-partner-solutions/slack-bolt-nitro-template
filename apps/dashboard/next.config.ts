@@ -7,7 +7,7 @@ config({ path: resolve(__dirname, "../../.env") });
 
 const nextConfig: NextConfig = {
   async rewrites() {
-    const backendUrl = process.env.BACKEND_API_URL || "http://localhost:3668";
+    const backendUrl = process.env.BACKEND_API_URL || "https://api.slackbound.com";
     
     return [
       {

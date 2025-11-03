@@ -8,6 +8,7 @@ import {
   listOrganizationMembers,
   updateMemberRole,
   removeMember,
+  getSeatUsage,
 } from "@/app/actions/user-config";
 import {
   Select,
@@ -56,6 +57,18 @@ export function MemberManagementCard() {
   });
 
   const members = (membersResult?.success ? (membersResult.data ?? []) : []).filter((m): m is NonNullable<typeof m> => m !== null);
+
+  // Fetch seat usage information
+  const {
+    data: seatUsageResult,
+    isLoading: isLoadingSeatUsage,
+  } = useQuery({
+    queryKey: ["seatUsage"],
+    queryFn: getSeatUsage,
+    enabled: isAdmin,
+  });
+
+  const seatUsage = seatUsageResult?.success ? seatUsageResult.data : null;
 
   // Update role mutation
   const updateRoleMutation = useMutation({
@@ -112,6 +125,60 @@ export function MemberManagementCard() {
         <p className="mb-6 text-sm text-muted-foreground">
           Manage workspace members and their roles.
         </p>
+
+        {/* Seat Usage Information */}
+        {isLoadingSeatUsage ? (
+          <div className="mb-6 flex items-center justify-center rounded-lg border border-border bg-muted/30 p-4">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          </div>
+        ) : seatUsage ? (
+          <div className="mb-6 rounded-lg border border-border bg-muted/30 p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex flex-col">
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Seat Usage
+                </span>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-2xl font-semibold">{seatUsage.currentUsage}</span>
+                  <span className="text-sm text-muted-foreground">
+                    / {seatUsage.limit} seats
+                  </span>
+                </div>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Available
+                </span>
+                <span
+                  className={`mt-1 text-lg font-semibold ${
+                    seatUsage.available === 0
+                      ? "text-destructive"
+                      : seatUsage.available <= 2
+                        ? "text-yellow-600"
+                        : "text-green-600"
+                  }`}
+                >
+                  {seatUsage.available} seats
+                </span>
+              </div>
+            </div>
+            {/* Progress bar */}
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-background">
+              <div
+                className={`h-full transition-all ${
+                  seatUsage.currentUsage >= seatUsage.limit
+                    ? "bg-destructive"
+                    : seatUsage.currentUsage / seatUsage.limit >= 0.8
+                      ? "bg-yellow-600"
+                      : "bg-green-600"
+                }`}
+                style={{
+                  width: `${Math.min(100, (seatUsage.currentUsage / seatUsage.limit) * 100)}%`,
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
 
         {isLoadingMembers ? (
           <div className="flex items-center justify-center py-8">

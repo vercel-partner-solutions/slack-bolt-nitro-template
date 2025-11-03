@@ -93,29 +93,28 @@ Import the database client from this app and schemas from the shared package:
 import { db } from "~/server/db";
 
 // Schemas (from shared package)
-import { user, userConfig, waitlist } from "@slackbound/db";
+import { userConfig, waitlist } from "@slackbound/db";
 import { eq } from "drizzle-orm";
 
 // Query
-const allUsers = await db.select().from(user);
+const allUserConfigs = await db.select().from(userConfig);
 
-// Insert
-const newUser = await db.insert(user).values({
-  id: "user_123",
-  name: "John Doe",
-  email: "user@example.com",
-  emailVerified: false,
-  createdAt: new Date(),
-  updatedAt: new Date(),
+// Insert user config with Slack mapping
+const newUserConfig = await db.insert(userConfig).values({
+  userId: "workos_user_123", // WorkOS user ID
+  slackUserId: "U123456",
+  slackTeamId: "T123456",
+  sendingDomain: "example.com",
+  shouldShowFullEmail: false,
 }).returning();
 
 // Update
-await db.update(user)
-  .set({ name: "Jane Doe" })
-  .where(eq(user.id, "user_123"));
+await db.update(userConfig)
+  .set({ slackUserId: "U789012" })
+  .where(eq(userConfig.userId, "workos_user_123"));
 
 // Delete
-await db.delete(user).where(eq(user.id, "user_123"));
+await db.delete(userConfig).where(eq(userConfig.userId, "workos_user_123"));
 ```
 
 ## Best Practices

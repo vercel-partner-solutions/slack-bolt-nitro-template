@@ -146,6 +146,21 @@ export function CommandPalette({
       }
       setCreatingSteps((prev) => ({ ...prev, slackChannel: true }));
 
+      // Step 1.5: Ensure user is added to the channel
+      // The backend tries to add the user during creation, but we ensure it happens
+      if (!channelResult.data.userAdded) {
+        try {
+          const addUserResult = await addUserToChannel(channelResult.data.id);
+          if (addUserResult.success && addUserResult.userAdded) {
+            console.log('✅ User added to channel');
+          }
+          // Don't fail if user can't be added - the channel was created successfully
+        } catch (error) {
+          console.warn('Failed to add user to channel:', error);
+          // Continue anyway - the channel was created successfully
+        }
+      }
+
       // Step 2: Check if email already exists, otherwise create it
       const existingEmailRoute = emailRoutes.find(
         route => route.emailAddress.toLowerCase() === emailAddress
