@@ -18,7 +18,7 @@
   ],
   "dependencies": {
     "@slack/bolt": "^4.4.0",
-    "@vercel/slack-bolt": "^0.1.2"
+    "@vercel/slack-bolt": "latest"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.1.3",
