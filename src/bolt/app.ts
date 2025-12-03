@@ -1,8 +1,8 @@
-import { App } from "@slack/bolt";
-import { VercelReceiver } from "@vercel/slack-bolt";
-import { installationStore } from "./installation-store";
-import registerListeners from "./listeners";
-import { installer } from "./installer";
+import { App } from '@slack/bolt';
+import { VercelReceiver } from '@vercel/slack-bolt';
+import { installationStore } from './installation-store';
+import { installer } from './installer';
+import registerListeners from './listeners';
 
 const receiver = new VercelReceiver();
 
