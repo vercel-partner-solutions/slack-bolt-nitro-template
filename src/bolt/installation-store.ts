@@ -1,11 +1,7 @@
-import type {
-  Installation,
-  InstallationQuery,
-  InstallationStore,
-} from "@slack/oauth";
-import { eq } from "drizzle-orm";
-import { db } from "../db";
-import { type NewSlackInstallation, slackInstallations } from "../db/schema";
+import type { Installation, InstallationQuery, InstallationStore } from '@slack/oauth';
+import { eq } from 'drizzle-orm';
+import { db } from '../db';
+import { type NewSlackInstallation, slackInstallations } from '../db/schema';
 
 export const installationStore: InstallationStore = {
   storeInstallation: async (installation: Installation) => {
@@ -23,17 +19,13 @@ export const installationStore: InstallationStore = {
       botUserId: installation.bot?.userId ?? null,
       botScopes: installation.bot?.scopes ?? null,
       botRefreshToken: installation.bot?.refreshToken ?? null,
-      botTokenExpiresAt: installation.bot?.expiresAt
-        ? new Date(installation.bot.expiresAt * 1000)
-        : null,
+      botTokenExpiresAt: installation.bot?.expiresAt ? new Date(installation.bot.expiresAt * 1000) : null,
 
       // User credentials
       userToken: installation.user.token ?? null,
       userScopes: installation.user.scopes ?? null,
       userRefreshToken: installation.user.refreshToken ?? null,
-      userTokenExpiresAt: installation.user.expiresAt
-        ? new Date(installation.user.expiresAt * 1000)
-        : null,
+      userTokenExpiresAt: installation.user.expiresAt ? new Date(installation.user.expiresAt * 1000) : null,
 
       // Metadata
       teamName: installation.team?.name ?? null,
@@ -44,8 +36,7 @@ export const installationStore: InstallationStore = {
       incomingWebhookUrl: installation.incomingWebhook?.url ?? null,
       incomingWebhookChannel: installation.incomingWebhook?.channel ?? null,
       incomingWebhookChannelId: installation.incomingWebhook?.channelId ?? null,
-      incomingWebhookConfigurationUrl:
-        installation.incomingWebhook?.configurationUrl ?? null,
+      incomingWebhookConfigurationUrl: installation.incomingWebhook?.configurationUrl ?? null,
 
       updatedAt: new Date(),
     };
@@ -59,7 +50,7 @@ export const installationStore: InstallationStore = {
         isEnterpriseInstall: installation.isEnterpriseInstall,
         enterpriseId: installation.enterprise?.id,
         teamId: installation.team?.id,
-      })
+      }),
     );
 
     const existing = await db
@@ -75,9 +66,7 @@ export const installationStore: InstallationStore = {
     }
   },
 
-  fetchInstallation: async (
-    query: InstallationQuery<boolean>
-  ): Promise<Installation> => {
+  fetchInstallation: async (query: InstallationQuery<boolean>): Promise<Installation> => {
     // Simple lookup: enterprise installs use enterprise_id, workspace installs use team_id
     const results = await db
       .select()
@@ -87,8 +76,8 @@ export const installationStore: InstallationStore = {
     if (results.length === 0) {
       throw new Error(
         `Installation not found for ${
-          query.isEnterpriseInstall ? "enterprise" : "team"
-        }: ${query.enterpriseId || query.teamId}`
+          query.isEnterpriseInstall ? 'enterprise' : 'team'
+        }: ${query.enterpriseId || query.teamId}`,
       );
     }
 
@@ -96,7 +85,7 @@ export const installationStore: InstallationStore = {
 
     // Validate required fields
     if (!record.userId) {
-      throw new Error("Invalid installation: missing userId");
+      throw new Error('Invalid installation: missing userId');
     }
 
     // Convert database record back to Installation type
@@ -119,9 +108,7 @@ export const installationStore: InstallationStore = {
         token: record.userToken ?? undefined,
         scopes: record.userScopes ?? undefined,
         refreshToken: record.userRefreshToken ?? undefined,
-        expiresAt: record.userTokenExpiresAt
-          ? Math.floor(record.userTokenExpiresAt.getTime() / 1000)
-          : undefined,
+        expiresAt: record.userTokenExpiresAt ? Math.floor(record.userTokenExpiresAt.getTime() / 1000) : undefined,
       },
       bot:
         record.botToken && record.botId && record.botUserId
@@ -131,9 +118,7 @@ export const installationStore: InstallationStore = {
               id: record.botId,
               userId: record.botUserId,
               refreshToken: record.botRefreshToken ?? undefined,
-              expiresAt: record.botTokenExpiresAt
-                ? Math.floor(record.botTokenExpiresAt.getTime() / 1000)
-                : undefined,
+              expiresAt: record.botTokenExpiresAt ? Math.floor(record.botTokenExpiresAt.getTime() / 1000) : undefined,
             }
           : undefined,
       incomingWebhook: record.incomingWebhookUrl
@@ -141,12 +126,11 @@ export const installationStore: InstallationStore = {
             url: record.incomingWebhookUrl,
             channel: record.incomingWebhookChannel ?? undefined,
             channelId: record.incomingWebhookChannelId ?? undefined,
-            configurationUrl:
-              record.incomingWebhookConfigurationUrl ?? undefined,
+            configurationUrl: record.incomingWebhookConfigurationUrl ?? undefined,
           }
         : undefined,
       appId: record.appId ?? undefined,
-      tokenType: (record.tokenType as "bot") ?? undefined,
+      tokenType: (record.tokenType as 'bot') ?? undefined,
       isEnterpriseInstall: record.isEnterpriseInstall,
     };
 
@@ -155,29 +139,20 @@ export const installationStore: InstallationStore = {
 
   deleteInstallation: async (query: InstallationQuery<boolean>) => {
     // Simple delete: enterprise installs use enterprise_id, workspace installs use team_id
-    const whereConditions = eq(
-      getInstallationRow(query),
-      getInstallationId(query)
-    );
+    const whereConditions = eq(getInstallationRow(query), getInstallationId(query));
 
     await db.delete(slackInstallations).where(whereConditions);
   },
 };
 
-function getInstallationId(query: {
-  isEnterpriseInstall?: boolean;
-  enterpriseId?: string;
-  teamId?: string;
-}) {
+function getInstallationId(query: { isEnterpriseInstall?: boolean; enterpriseId?: string; teamId?: string }) {
   const id = query?.isEnterpriseInstall ? query.enterpriseId : query.teamId;
   if (!id) {
-    throw new Error("Malformed installation query");
+    throw new Error('Malformed installation query');
   }
   return id;
 }
 
 function getInstallationRow(query: { isEnterpriseInstall?: boolean }) {
-  return query?.isEnterpriseInstall
-    ? slackInstallations.enterpriseId
-    : slackInstallations.teamId;
+  return query?.isEnterpriseInstall ? slackInstallations.enterpriseId : slackInstallations.teamId;
 }

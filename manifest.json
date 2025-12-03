@@ -1,10 +1,8 @@
 {
-  "_metadata": {
-    "major_version": 1,
-    "minor_version": 1
-  },
   "display_information": {
-    "name": "slack-bolt-with-nitro"
+    "name": "slack-bolt-with-nitro",
+    "description": "This is a generic Bolt for JavaScript (TypeScript) template app used to build out Slack apps with Nitro",
+    "background_color": "#590088"
   },
   "features": {
     "app_home": {
@@ -27,13 +25,14 @@
     "slash_commands": [
       {
         "command": "/sample-command",
+        "url": "https://<your-domain>/api/slack/events",
         "description": "Runs a sample command",
-        "should_escape": false,
-        "url": "https://<your-domain>/api/slack/events"
+        "should_escape": false
       }
     ]
   },
   "oauth_config": {
+    "redirect_urls": ["https://<your-domain>/slack/callback"],
     "scopes": {
       "bot": ["channels:history", "chat:write", "commands"]
     }
