@@ -2,7 +2,7 @@
   "name": "slack-bolt-with-nitro",
   "version": "1.0.0",
   "scripts": {
-    "build": "nitro build",
+    "build": "pnpm db:push && nitro build",
     "dev": "nitro dev",
     "dev:tunnel": "tsx scripts/dev.tunnel.ts",
     "lint": "biome check",
